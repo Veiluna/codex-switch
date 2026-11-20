@@ -1,0 +1,14 @@
+# 本机账号数据和测试运行期间的临时文件
+.codex/
+accounts/
+auth.json
+*_auth.json
+.current
+.switch.lock
+.test-switch-*/
+.test-desktop-*/
+tests/.tmp-*/
+*.tmp
+
+# 本地分发包
+dist/
