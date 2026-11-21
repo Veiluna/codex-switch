@@ -48,18 +48,22 @@ using System.IO;
 using System.Text;
 namespace CodexSwitch {
     internal sealed class CatalogEntry {
-        public string Name, AccountId="workspace-test",Plan="未知",LoginType="未知",Email="person@example.test",SnapshotId="snapshot",QuotaText="尚无额度记录",ResetHint="";
+        public string Name, AccountId="workspace-test",Plan="未知",LoginType="未知",Email="person@example.test",SnapshotId="snapshot",QuotaText="尚无额度记录",ResetHint="",QuotaSummary="Credits 余额：未知";
+        public QuotaWindow[] Windows=new QuotaWindow[0];
         public bool IsCurrent, IsSaved=true, HasDueExhausted;
     }
+    internal sealed class QuotaWindow { public string Summary="共享周额度：剩余 12% · 重置倒计时 25:01"; }
+    internal static class QuotaReader { public static string FormatWindowSummary(QuotaWindow window,DateTimeOffset now) {return window.Summary;} }
     internal sealed class OperationResult {
         public bool Success; public string Code,Message;
         public OperationResult(bool success,string code,string message) {Success=success;Code=code;Message=message;}
     }
     internal sealed class AccountService : IDisposable {
+        public static string FormatQuotaDetails(CatalogEntry entry,DateTimeOffset now) {return entry.QuotaText+"\n共享完整详情";}
         public bool CurrentReadFailed {get; private set;}
         public AccountService(string root) {CurrentReadFailed=root.EndsWith("current-unreadable",StringComparison.Ordinal);}
         public CatalogEntry[] List() { return new[] {
-            new CatalogEntry {Name="工作", IsCurrent=!CurrentReadFailed},
+            new CatalogEntry {Name="工作", IsCurrent=!CurrentReadFailed, Windows=new[] {new QuotaWindow()}},
             new CatalogEntry {Name="study", QuotaText="主要窗口：上次剩余 0%", ResetHint="主要窗口：快照中的重置时间已到，可能已恢复，尚未重新查询。", HasDueExhausted=true},
             new CatalogEntry {Name="duplicate", AccountId="未知"}
         }; }
@@ -94,11 +98,13 @@ namespace CodexSwitch {
     $result = Invoke-Cli $exe @('list')
     Assert-Cli ($result.Code -eq 0 -and $result.Text.Contains('已到点') -and $result.Text.Contains('未知')) 'list preserves unknown and due exhausted metadata'
     Assert-Cli ($result.Text.Contains('上次已用尽') -and $result.Text.Contains('快照中的重置时间已到')) 'list retains exhausted emphasis together with the existing reset hint'
+    Assert-Cli ($result.Text.Contains('共享周额度：剩余 12% · 重置倒计时 25:01') -and $result.Text.Contains('Credits 余额：未知')) 'list delegates quota and countdown to shared formatter'
     $result = Invoke-Cli $exe @('current')
     Assert-Cli ($result.Code -eq 0 -and $result.Text.Contains('工作') -and -not $result.Text.Contains('study')) 'current outputs actual service current only'
     $result = Invoke-Cli $exe @('show','study')
     Assert-Cli ($result.Code -eq 0 -and $result.Text.Contains('上次剩余 0%') -and $result.Text.Contains('已到点')) 'show keeps historical zero after reset time'
     Assert-Cli ($result.Text.Contains('上次已用尽') -and $result.Text.Contains('快照中的重置时间已到')) 'show retains exhausted emphasis together with the existing reset hint'
+    Assert-Cli ($result.Text.Contains('共享完整详情')) 'show delegates dynamic full details to shared service'
     $unreadableRoot = Join-Path $temporary 'current-unreadable'
     $result = Invoke-Cli $exe @('--root',$unreadableRoot,'list')
     Assert-Cli ($result.Text.Contains('无法识别当前登录') -and $result.Text.Contains('study') -and -not $result.Text.Contains('[当前登录]')) 'unreadable current login is explicit while saved catalog remains visible'
@@ -170,6 +176,25 @@ namespace CodexSwitch {
     $result = Invoke-Cli $realExe @('--root',$dataRoot,'current')
     Assert-Cli ($result.Code -eq 0 -and $result.Text.Contains('alpha') -and -not $result.Text.Contains('beta')) 'actual service ignores dishonest marker after token rotation'
     Assert-Cli (-not $result.Text.Contains('synthetic-secret') -and -not $result.Text.Contains('access_token') -and -not $result.Text.Contains('refresh_token') -and -not $result.Text.Contains('h.')) 'metadata output contains no synthetic credential values or JSON'
+    $identity = 'user:' + 'fake-user-a'.Length + ':fake-user-a:fake-workspace'
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $snapshotKey = [Convert]::ToBase64String($sha.ComputeHash($utf8.GetBytes($identity))).Replace('/','_').Replace('+','-').TrimEnd('=') }
+    finally { $sha.Dispose() }
+    $snapshotPath = Join-Path $accounts ('.quota-' + $snapshotKey + '.snapshot')
+    $epoch = [DateTimeOffset]::Parse('1970-01-01T00:00:00Z')
+    $reset = [long][Math]::Floor(([DateTimeOffset]::UtcNow.AddHours(25).AddMinutes(1) - $epoch).TotalSeconds)
+    $quotaData = @{ rate_limit = @{ primary_window = @{ used_percent = 25; limit_window_seconds = 18000; reset_at = $reset }; secondary_window = @{ used_percent = 100; limit_window_seconds = 604800; reset_at = $reset } }; credits = @{ balance = $null } }
+    $quotaSnapshot = @{ captured_at = [DateTimeOffset]::UtcNow.AddHours(-1).ToString('o'); quota_data = $quotaData; quota_text = 'STALE-COUNTDOWN-999:99' }
+    [IO.File]::WriteAllText($snapshotPath,($quotaSnapshot | ConvertTo-Json -Depth 12 -Compress),$utf8)
+    $result = Invoke-Cli $realExe @('--root',$dataRoot,'list')
+    Assert-Cli ($result.Code -eq 0 -and $result.Text.IndexOf('周额度') -lt $result.Text.IndexOf('5 小时额度') -and $result.Text.Contains('周额度：剩余 0%') -and $result.Text.Contains('5 小时额度：剩余 75%') -and $result.Text.Contains('25:01')) 'actual CLI sorts by exact period and shows total-hour countdown without swapping usage'
+    $result = Invoke-Cli $realExe @('--root',$dataRoot,'show','alpha')
+    Assert-Cli ($result.Code -eq 0 -and $result.Text.Contains('25:01') -and -not $result.Text.Contains('STALE-COUNTDOWN') -and $result.Text.Contains('历史快照')) 'actual CLI rebuilds historical full details instead of caching saved countdown text'
+    $quotaSnapshot.quota_data.rate_limit.secondary_window.reset_at = [long][Math]::Floor(([DateTimeOffset]::UtcNow.AddSeconds(-1) - $epoch).TotalSeconds)
+    $quotaSnapshot.quota_data.rate_limit.primary_window.Remove('reset_at')
+    [IO.File]::WriteAllText($snapshotPath,($quotaSnapshot | ConvertTo-Json -Depth 12 -Compress),$utf8)
+    $result = Invoke-Cli $realExe @('--root',$dataRoot,'show','alpha')
+    Assert-Cli ($result.Code -eq 0 -and $result.Text.Contains('周额度：剩余 0% · 重置倒计时 00:00') -and $result.Text.Contains('5 小时额度：剩余 75% · 重置倒计时 未知') -and $result.Text.Contains('尚未重新查询')) 'actual CLI distinguishes due exhaustion from missing reset and never renews historical zero'
     $result = Invoke-Cli $realExe @('--root',$dataRoot,'save')
     Assert-Cli ($result.Code -eq 0 -and (Test-Path -LiteralPath $alpha) -and [IO.File]::ReadAllText($alpha) -eq $latest) 'unnamed save preserves a verified existing alias'
     $result = Invoke-Cli $realExe @('save','renamed','--root',$dataRoot)

@@ -96,7 +96,7 @@ namespace CodexSwitch
         CatalogEntry[] List();
         OperationResult Save(string name);
         OperationResult Delete(string name, string snapshotId);
-        OperationResult Switch(string target, Func<string,string,bool> confirm);
+        OperationResult Switch(string target,string snapshotId,Func<string,string,bool> confirm);
     }
     internal sealed class DesktopAccounts : IDesktopAccounts
     {
@@ -106,7 +106,7 @@ namespace CodexSwitch
         public CatalogEntry[] List() { return service.List(); }
         public OperationResult Save(string name) { return service.Save(name); }
         public OperationResult Delete(string name, string snapshotId) { return service.Delete(name, snapshotId); }
-        public OperationResult Switch(string target, Func<string,string,bool> confirm) { return service.Switch(target, confirm); }
+        public OperationResult Switch(string target,string snapshotId,Func<string,string,bool> confirm) { return service.Switch(target,snapshotId,confirm); }
         public void Dispose() { service.Dispose(); }
     }
     internal sealed class RefreshGlyphButton : Button
@@ -139,9 +139,11 @@ namespace CodexSwitch
     }
     internal sealed class AccountRow
     {
-        internal readonly CatalogEntry Entry;
+        internal CatalogEntry Entry;
         internal string Reminder;
-        internal AccountRow(CatalogEntry entry) { Entry=entry; }
+        internal string DisplaySignature;
+        internal AccountRow(CatalogEntry entry) { Entry=entry; DisplaySignature=Signature(); }
+        internal string Signature() { return Entry.Name+"\n"+Entry.Email+"\n"+Entry.IsCurrent+"\n"+Entry.IsSaved+"\n"+Reminder; }
         public override string ToString() { return Entry.Name + (Entry.IsCurrent ? " · 当前登录" : "") + (!Entry.IsSaved ? " · 未保存" : "") + (String.IsNullOrEmpty(Reminder)?"":" · "+Reminder); }
     }
     // Label's default DrawText padding grows with the font size. Detail headings use the
@@ -167,26 +169,48 @@ namespace CodexSwitch
         internal string CompleteText { get { return completeText; } set { SetContent(value,value); } }
         internal void SetContent(string complete,string preview)
         {
-            complete=complete??""; preview=preview??""; if(completeText==complete && previewText==preview) return;
+            complete=complete??""; preview=(preview??"").Replace("\r\n","\n"); if(completeText==complete && previewText==preview) return;
             completeText=complete; previewText=preview; RefreshPreview();
         }
         protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); RefreshPreview(); }
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); RefreshPreview(); }
         private void RefreshPreview()
         {
-            Text=previewText; if(!IsHandleCreated || TextLength==0 || ClientSize.Height<=0) return;
-            Select(0,0);
-            int lineHeight=Font.Height, next=GetFirstCharIndexFromLine(1);
-            if(next>0) lineHeight=Math.Max(lineHeight,GetPositionFromCharIndex(next).Y-GetPositionFromCharIndex(0).Y);
-            if(GetPositionFromCharIndex(TextLength-1).Y+lineHeight<=ClientSize.Height) return;
-            // Keep only complete visible lines. The modal always reads CompleteText, never this summary.
-            int low=0,high=previewText.Length;
-            while(low<high)
+            if(!IsHandleCreated || ClientSize.Height<=0) { if(Text!=previewText) Text=previewText; return; }
+            if(Text==previewText && Fits(this)) return;
+            string visible=previewText;
+            // Measure in a separate RichEdit; probing truncation must never rewrite the visible preview.
+            using(var measure=new RichTextBox { Size=ClientSize, Font=Font, BorderStyle=BorderStyle.None,
+                WordWrap=true, ScrollBars=RichTextBoxScrollBars.None, Text=previewText })
             {
-                int middle=(low+high+1)/2; Text=previewText.Substring(0,middle).TrimEnd()+"…";
-                if(GetPositionFromCharIndex(TextLength-1).Y+lineHeight<=ClientSize.Height) low=middle; else high=middle-1;
+                var handle=measure.Handle;
+                if(!Fits(measure))
+                {
+                    int low=0,high=previewText.Length;
+                    while(low<high)
+                    {
+                        int middle=(low+high+1)/2; measure.Text=previewText.Substring(0,middle).TrimEnd()+"…";
+                        if(Fits(measure)) low=middle; else high=middle-1;
+                    }
+                    visible=previewText.Substring(0,low).TrimEnd()+"…";
+                }
             }
-            Text=previewText.Substring(0,low).TrimEnd()+"…"; Select(0,0);
+            if(Text==visible) return;
+            int start=SelectionStart,length=SelectionLength;
+            string old=Text; int prefix=0,suffix=0;
+            while(prefix<old.Length && prefix<visible.Length && old[prefix]==visible[prefix]) prefix++;
+            while(suffix<old.Length-prefix && suffix<visible.Length-prefix && old[old.Length-1-suffix]==visible[visible.Length-1-suffix]) suffix++;
+            Select(prefix,old.Length-prefix-suffix); SelectedText=visible.Substring(prefix,visible.Length-prefix-suffix);
+            int delta=visible.Length-old.Length;
+            if(start>=old.Length-suffix) start+=delta;
+            Select(Math.Min(start,TextLength),Math.Min(length,Math.Max(0,TextLength-start)));
+        }
+        private static bool Fits(RichTextBox text)
+        {
+            if(text.TextLength==0) return true;
+            int lineHeight=text.Font.Height,next=text.GetFirstCharIndexFromLine(1);
+            if(next>0) lineHeight=Math.Max(lineHeight,text.GetPositionFromCharIndex(next).Y-text.GetPositionFromCharIndex(0).Y);
+            return text.GetPositionFromCharIndex(text.TextLength-1).Y+lineHeight<=text.ClientSize.Height;
         }
         internal DetailPreview(string name)
         {
@@ -205,6 +229,7 @@ namespace CodexSwitch
         private readonly System.Windows.Forms.Timer reminderTimer=new System.Windows.Forms.Timer();
         private CatalogEntry[] entries=new CatalogEntry[0];
         private bool loading, busy, closing, readFailed, currentReadFailed;
+        private string pendingWorkspaceUser,pendingWorkspaceAccount;
         private DateTimeOffset reminderNow=DateTimeOffset.UtcNow;
         internal readonly TextBox SearchBox;
         internal readonly InputFrame SearchInput;
@@ -282,12 +307,15 @@ namespace CodexSwitch
             SearchBox.TextChanged+=delegate { if(!loading) RenderAccounts(null); };
             AccountList.SelectedIndexChanged+=delegate { if(!loading) UpdateDetail(); };
             AccountList.KeyDown+=delegate(object sender,KeyEventArgs e) { if(e.KeyCode==Keys.Enter) { e.SuppressKeyPress=true; InvokeSelectedAccount(); } };
-            RefreshButton.Click+=delegate { RefreshAccounts(null); if(!readFailed && !currentReadFailed) SetStatus("已刷新本机账号列表。"); };
+            RefreshButton.Click+=delegate {
+                if(pendingWorkspaceUser!=null) RefreshPendingWorkspace();
+                else { RefreshAccounts(null); if(!readFailed && !currentReadFailed) SetStatus("已刷新本机账号列表。"); }
+            };
             switchButton.Click+=delegate { InvokeSelectedAccount(); }; saveButton.Click+=delegate { SaveCurrentAccount(); }; deleteButton.Click+=delegate { DeleteSelectedAccount(); };
             ConfirmDelete=delegate(string target) { using(var dialog=new ConfirmDeleteDialog(target)) return dialog.ShowDialog(this)==DialogResult.OK; };
             ConfirmSwitch=delegate(string phase,string target) { using(var dialog=new ConfirmSwitchDialog(phase,target)) return dialog.ShowDialog(this)==DialogResult.OK; };
             reminderTimer.Interval=1000; reminderTimer.Tick+=delegate { UpdateReminders(DateTimeOffset.UtcNow); }; reminderTimer.Start();
-            Activated+=delegate { UpdateReminders(DateTimeOffset.UtcNow); };
+            Activated+=delegate { UpdateReminders(DateTimeOffset.UtcNow); RefreshPendingWorkspace(); };
             Shown+=delegate { AccountList.Focus(); };
             FormClosing+=delegate(object sender,FormClosingEventArgs e) { if(busy) { e.Cancel=true; SetStatus("操作进行中，请等待结果后关闭窗口。"); } else closing=true; };
             RefreshAccounts(null);
@@ -311,6 +339,20 @@ namespace CodexSwitch
             e.DrawFocusRectangle();
         }
         private static string Known(string value) { return String.IsNullOrWhiteSpace(value)?"未知":value; }
+        private static bool IsKnownIdentity(string value) { return !String.IsNullOrWhiteSpace(value) && value!="未知"; }
+        private void RefreshPendingWorkspace()
+        {
+            if(busy || pendingWorkspaceUser==null) return;
+            RefreshAccounts(null);
+            if(readFailed || currentReadFailed) return;
+            foreach(var entry in entries)
+                if(entry.IsCurrent && entry.CurrentIdentityVerified && entry.LoginType=="ChatGPT" && entry.UserId==pendingWorkspaceUser && entry.AccountId==pendingWorkspaceAccount)
+                {
+                    pendingWorkspaceUser=pendingWorkspaceAccount=null;
+                    SetStatus("已从本机登录信息确认目标用户和工作区。"); return;
+                }
+            SetStatus("仍未确认目标工作区（ID："+pendingWorkspaceAccount+"）。请在 Codex 的账号菜单中选择该工作区，然后回到此窗口自动核对。");
+        }
         private static string Identity(CatalogEntry entry) { return (entry.IsCurrent?"current:":"saved:")+entry.Name; }
         internal void RefreshAccounts(string selected)
         {
@@ -328,25 +370,31 @@ namespace CodexSwitch
             string query=SearchBox.Text.Trim(); int saved=0,matched=0; CatalogEntry current=null;
             foreach(var entry in entries) { if(entry.IsCurrent && current==null) current=entry; if(entry.IsSaved) saved++; }
             currentLabel.Text=readFailed || currentReadFailed?"无法识别当前登录":current==null?"未登录":current.IsSaved?"当前登录已置顶":"当前登录 · 未保存";
-            loading=true; AccountList.BeginUpdate();
+            var visible=new System.Collections.Generic.List<CatalogEntry>();
+            if(current!=null) visible.Add(current);
+            foreach(var entry in entries)
+            {
+                bool match=query.Length==0 || (entry.Name??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0 || (entry.Email??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0;
+                if(entry.IsSaved && match) matched++;
+                if(!entry.IsCurrent && match) visible.Add(entry);
+            }
+            bool rebuild=visible.Count!=AccountList.Items.Count;
+            if(!rebuild) for(int index=0;index<visible.Count;index++) if(Identity(visible[index])!=Identity(EntryAt(index))) { rebuild=true; break; }
+            loading=true; if(rebuild) AccountList.BeginUpdate();
             try
             {
-                AccountList.Items.Clear();
-                if(current!=null) AccountList.Items.Add(new AccountRow(current));
-                foreach(var entry in entries)
+                if(rebuild)
                 {
-                    bool match=query.Length==0 || (entry.Name??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0 || (entry.Email??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0;
-                    if(entry.IsSaved && match) matched++;
-                    if(entry.IsCurrent || !match) continue;
-                    AccountList.Items.Add(new AccountRow(entry));
+                    AccountList.Items.Clear(); foreach(var entry in visible) AccountList.Items.Add(new AccountRow(entry));
                 }
+                else for(int index=0;index<visible.Count;index++) ((AccountRow)AccountList.Items[index]).Entry=visible[index];
                 int selection=-1;
                 for(int i=0;i<AccountList.Items.Count;i++) if(selected!=null?EntryAt(i).Name==selected:Identity(EntryAt(i))==old) { selection=i; break; }
                 if(selection<0 && AccountList.Items.Count>0) selection=0; AccountList.SelectedIndex=selection;
                 countLabel.Text=query.Length==0?"已保存 "+saved+" 个账号":matched==0?"没有匹配的已保存账号":"匹配 "+matched+" / 已保存 "+saved;
                 UpdateRowReminders();
             }
-            finally { loading=false; AccountList.EndUpdate(); UpdateDetail(); }
+            finally { loading=false; if(rebuild) AccountList.EndUpdate(); UpdateDetail(); }
         }
         private static string DueText(CatalogEntry entry,DateTimeOffset now)
         {
@@ -357,8 +405,14 @@ namespace CodexSwitch
         }
         private void UpdateRowReminders()
         {
-            foreach(AccountRow row in AccountList.Items) row.Reminder=DueText(row.Entry,reminderNow);
-            AccountList.Invalidate();
+            for(int index=0;index<AccountList.Items.Count;index++)
+            {
+                var row=(AccountRow)AccountList.Items[index]; string reminder=DueText(row.Entry,reminderNow);
+                row.Reminder=reminder;
+                string signature=row.Signature(); if(signature==row.DisplaySignature) continue;
+                row.DisplaySignature=signature;
+                if(AccountList.IsHandleCreated) AccountList.Invalidate(AccountList.GetItemRectangle(index));
+            }
         }
         internal void UpdateReminders(DateTimeOffset now)
         {
@@ -384,23 +438,16 @@ namespace CodexSwitch
             var summary=new System.Text.StringBuilder();
             string captured=selected.CapturedAtUtc.HasValue?"上次成功："+selected.CapturedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz"):"尚无成功记录。切离这个账号时会尝试保存。";
             text.AppendLine(captured); summary.AppendLine(captured);
-            if(!String.IsNullOrEmpty(selected.SnapshotFailure) && (selected.QuotaText??"").IndexOf(selected.SnapshotFailure,StringComparison.Ordinal)<0) text.AppendLine(selected.SnapshotFailure);
-            if(!String.IsNullOrWhiteSpace(selected.QuotaText)) text.AppendLine(selected.QuotaText);
-            // QuotaReader owns these exact display fields. Copy their values verbatim; never infer
-            // unknown values or parse percentages. Unrecognized formats retain their original text.
-            bool knownSummary=false;
-            foreach(string line in (selected.QuotaText??"").Replace("\r","").Split('\n'))
-                if(line.StartsWith("Credits 余额：",StringComparison.Ordinal) || line.IndexOf("：剩余",StringComparison.Ordinal)>=0 || line.IndexOf("：上次剩余",StringComparison.Ordinal)>=0)
-                { summary.AppendLine(line); knownSummary=true; }
-            if(!knownSummary && !String.IsNullOrWhiteSpace(selected.QuotaText)) summary.AppendLine(selected.QuotaText);
-            if(selected.Windows!=null) foreach(var window in selected.Windows)
+            text.AppendLine(AccountService.FormatQuotaDetails(selected,reminderNow));
+            if(selected.Windows!=null) foreach(var window in QuotaReader.Order(selected.Windows))
             {
-                string label=Known(window.Label);
-                if(!window.ResetAtUtc.HasValue) { text.AppendLine(label+"：重置时间未知"); summary.AppendLine(label+"：重置时间未知"); continue; }
-                bool due=reminderNow>=window.ResetAtUtc.Value;
-                string reset=label+"："+(due?(window.Exhausted?"上次已用尽 · 已到点":"已到点"):"尚未到点")+" · 记录的重置时间 "+window.ResetAtUtc.Value.ToLocalTime().ToString("MM-dd HH:mm:ss");
-                text.AppendLine(reset); summary.AppendLine(reset);
+                string line=QuotaReader.FormatWindowSummary(window,reminderNow);
+                bool due=window.ResetAtUtc.HasValue && reminderNow>=window.ResetAtUtc.Value;
+                if(due) line+=" · "+(window.Exhausted?"上次已用尽 · 已到点":"已到点");
+                summary.AppendLine(line);
+                if(due) text.AppendLine(QuotaReader.WindowLabel(window)+"："+(window.Exhausted?"上次已用尽 · 已到点":"已到点"));
             }
+            if(!String.IsNullOrWhiteSpace(selected.QuotaSummary)) summary.AppendLine(selected.QuotaSummary);
             if(selected.Windows!=null && selected.Windows.Length>0) text.Append("到点仅为时间提醒，剩余额度以新快照为准。");
             if(!String.IsNullOrEmpty(selected.SnapshotFailure) && summary.ToString().IndexOf(selected.SnapshotFailure,StringComparison.Ordinal)<0) summary.Insert(0,selected.SnapshotFailure+Environment.NewLine);
             QuotaText.SetContent(text.ToString(),summary.ToString().TrimEnd());
@@ -420,23 +467,35 @@ namespace CodexSwitch
         internal void InvokeSelectedAccount()
         {
             var selected=SelectedEntry; if(busy || selected==null || !selected.IsSaved || selected.IsCurrent || !IsHandleCreated) return;
-            string target=selected.Name; SetBusy(true); SetStatus("正在切换并保存离开时快照，请稍候…");
+            pendingWorkspaceUser=pendingWorkspaceAccount=null;
+            string target=selected.Name,snapshot=selected.SnapshotId; SetBusy(true); SetStatus("正在切换并保存离开时快照，请稍候…");
             var worker=new Thread(delegate()
             {
-                OperationResult result;
+                OperationResult result; bool forcePrompted=false;
                 try
                 {
-                    result=service.Switch(target,delegate(string phase,string account)
+                    result=service.Switch(target,snapshot,delegate(string phase,string account)
                     {
                         if(closing || IsDisposed || !IsHandleCreated) return false;
-                        return (bool)Invoke(new Func<bool>(delegate { return ConfirmSwitch(phase,account); }));
+                        if(account!=target) return false;
+                        if(phase=="Close") return true;
+                        if(phase!="Force" || forcePrompted) return false;
+                        forcePrompted=true;
+                        return (bool)Invoke(new Func<bool>(delegate { return ConfirmSwitch("Force",account); }));
                     });
                 }
                 catch { result=new OperationResult(false,"Unavailable","切换未完成，请检查本机账号目录和桌面端状态后重试。"); }
                 try
                 {
                     if(closing || IsDisposed || !IsHandleCreated) return;
-                    BeginInvoke((MethodInvoker)delegate { SetBusy(false); RefreshAccounts(target); SetResultStatus(result.Message); });
+                    BeginInvoke((MethodInvoker)delegate {
+                        SetBusy(false); RefreshAccounts(target); SetResultStatus(result.Message);
+                        if(result.Code=="WorkspaceSelectionRequired" && IsKnownIdentity(result.TargetUserId) && IsKnownIdentity(result.TargetAccountId))
+                        {
+                            pendingWorkspaceUser=result.TargetUserId; pendingWorkspaceAccount=result.TargetAccountId;
+                            SetResultStatus(result.Message+" 完成后回到此窗口，将自动核对当前用户和工作区。");
+                        }
+                    });
                 }
                 catch(InvalidOperationException) { }
             });

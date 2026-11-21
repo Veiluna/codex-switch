@@ -111,5 +111,87 @@ internal static class AccountServiceReviewTests
         }
         Console.WriteLine("评审修复检查："+checks+" 项，失败 "+failures+" 项。");
         if(failures>0) Environment.Exit(1);
+        WorkspaceSelection();
+        CurrentIdentity();
+    }
+
+    static void CurrentIdentity() {
+        string root=Path.Combine(Environment.CurrentDirectory,"tests",".tmp-current-identity-"+Guid.NewGuid().ToString("N"));
+        string accounts=Path.Combine(root,"accounts"),auth=Path.Combine(root,"auth.json");
+        Directory.CreateDirectory(accounts);
+        byte[] known=Auth("same-user","workspace-a");
+        File.WriteAllBytes(Path.Combine(accounts,"known_auth.json"),known);
+        File.WriteAllBytes(Path.Combine(accounts,"other_auth.json"),Auth("other-user","workspace-b"));
+        try {
+            using(var service=new AccountService(root)) {
+                string original=Encoding.UTF8.GetString(known);
+                string[] invalid={
+                    original.Replace("{\"tokens\":","{\"OPENAI_API_KEY\":\"fake-key\",\"tokens\":"),
+                    "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"account_id\":\"workspace-a\",\"access_token\":\"fake-no-claims\"}}",
+                    original.Replace("\"account_id\":\"workspace-a\"","\"account_id\":\"conflicting-workspace\""),
+                    Encoding.UTF8.GetString(Auth("None","workspace-a")),
+                    Encoding.UTF8.GetString(Auth("same-user","unknown"))
+                };
+                foreach(string json in invalid) {
+                    File.WriteAllText(auth,json);
+                    Check("实际活动API-key或缺失冲突未知声明不能继承存档的身份确认能力",delegate {
+                        CatalogEntry current=Array.Find(service.List(),delegate(CatalogEntry e){return e.IsCurrent;});
+                        var field=typeof(CatalogEntry).GetField("CurrentIdentityVerified");
+                        return current!=null && field!=null && !(bool)field.GetValue(current);
+                    });
+                }
+                File.WriteAllBytes(auth,known);
+                Check("完整managed活动身份可确认，非当前存档不带确认能力",delegate {
+                    var field=typeof(CatalogEntry).GetField("CurrentIdentityVerified");
+                    CatalogEntry[] entries=service.List();
+                    return field!=null && entries[0].IsCurrent && (bool)field.GetValue(entries[0]) &&
+                        Array.TrueForAll(entries,delegate(CatalogEntry e){return e.IsCurrent || !(bool)field.GetValue(e);});
+                });
+            }
+        } finally {Directory.Delete(root,true);}
+        if(failures>0) Environment.Exit(1);
+    }
+
+    static void WorkspaceSelection() {
+        string root=Path.Combine(Environment.CurrentDirectory,"tests",".tmp-workspace-service-"+Guid.NewGuid().ToString("N"));
+        string accounts=Path.Combine(root,"accounts"),auth=Path.Combine(root,"auth.json");
+        Directory.CreateDirectory(accounts);
+        byte[] before=Auth("same-user","workspace-a"),target=Auth("same-user","workspace-b");
+        string oldPath=Path.Combine(accounts,"old-name_auth.json"),newPath=Path.Combine(accounts,"target_auth.json"),marker=Path.Combine(accounts,".current");
+        File.WriteAllBytes(auth,before);File.WriteAllBytes(oldPath,before);File.WriteAllBytes(newPath,target);File.WriteAllText(marker,"old-name");
+        try {
+            using(var service=new AccountService(root))
+            using(var legacy=new LegacyOperations()) {
+                typeof(LegacyOperations).GetMethod("Initialize",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(legacy,null);
+                var runspace=(Runspace)typeof(LegacyOperations).GetField("runspace",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(legacy);
+                using(var ps=PowerShell.Create()) {
+                    ps.Runspace=runspace;
+                    ps.AddScript(@"function Get-SwitchDesktopState { [pscustomobject]@{Known=$true;Processes=@(42);LaunchId='fake'} }
+function Invoke-SwitchDesktopProcessAction { throw 'must not close desktop' }
+function Start-SwitchDesktop { throw 'must not restart desktop' }",false).Invoke();
+                }
+                int fetched=0,confirmed=0;
+                service.SwitchBackend=legacy.SwitchShared;
+                service.FetchQuota=delegate(byte[] bytes) {
+                    fetched++;
+                    if(Convert.ToBase64String(bytes)!=Convert.ToBase64String(before)) throw new Exception("wrong snapshot owner");
+                    return "{\"account_id\":\"workspace-a\",\"user_id\":\"same-user\",\"rate_limit\":{\"primary_window\":{\"used_percent\":25,\"reset_at\":1893456000}}}";
+                };
+                OperationResult result=service.Switch("target",delegate {confirmed++;return true;});
+                Check("同用户不同空间保留桌面并要求客户端确认，零退出确认",delegate {return !result.Success && result.Code=="WorkspaceSelectionRequired" && confirmed==0 && result.TargetUserId=="same-user" && result.TargetAccountId=="workspace-b";});
+                CatalogEntry[] entries=service.List();
+                CatalogEntry old=Array.Find(entries,delegate(CatalogEntry e){return e.Name=="old-name";});
+                CatalogEntry next=Array.Find(entries,delegate(CatalogEntry e){return e.Name=="target";});
+                Check("离开快照保存在旧档案名下，目标不继承额度",delegate {return fetched==1 && old.CapturedAtUtc.HasValue && old.Windows.Length==1 && !next.CapturedAtUtc.HasValue && old.IsCurrent && !next.IsCurrent;});
+                Check("等待客户端选择时活动登录和标记均保持原值",delegate {return Convert.ToBase64String(File.ReadAllBytes(auth))==Convert.ToBase64String(before) && File.ReadAllText(marker)=="old-name";});
+                service.FetchQuota=delegate {throw new IOException("synthetic quota unavailable");};
+                result=service.Switch("target",delegate {confirmed++;return true;});
+                Check("额度失败仍返回未确认状态及锁内身份，保留旧成功快照",delegate {return !result.Success && result.Code=="WorkspaceSelectionRequired" && result.TargetUserId=="same-user" && result.TargetAccountId=="workspace-b" && result.Message.Contains("额度捕获失败") && Array.Find(service.List(),delegate(CatalogEntry e){return e.Name=="old-name";}).CapturedAtUtc.HasValue;});
+                File.WriteAllBytes(auth,target); // Synthetic equivalent of the client's own menu selection.
+                result=service.Switch("target",delegate {confirmed++;return true;});
+                Check("客户端自行选择后重读身份，重复点击不再捕获或退出",delegate {return result.Success && result.Code=="AlreadyCurrent" && fetched==1 && confirmed==0 && service.List()[0].Name=="target";});
+            }
+        } finally {Directory.Delete(root,true);}
+        if(failures>0) Environment.Exit(1);
     }
 }

@@ -15,8 +15,12 @@ namespace CodexSwitch
         public readonly bool Success;
         public readonly string Code;
         public readonly string Message;
+        public readonly string TargetUserId;
+        public readonly string TargetAccountId;
         public OperationResult(bool success, string code, string message)
-        { Success = success; Code = code; Message = message; }
+            : this(success,code,message,"","") { }
+        public OperationResult(bool success, string code, string message, string targetUserId, string targetAccountId)
+        { Success = success; Code = code; Message = message; TargetUserId = targetUserId; TargetAccountId = targetAccountId; }
     }
 
     internal interface ILegacyOperations : IDisposable
@@ -101,16 +105,14 @@ namespace CodexSwitch
                 ps.Runspace = runspace;
                 ps.AddScript(@"param($root,$name,$expected,$approve,$departure)
 $confirmation = { param($Owner,$Name,$Phase) $approve.Invoke($Phase,$Name) }.GetNewClosure()
-$action = { param($Root,$Name,$Guard)
-    Invoke-SwitchAccount -Root $Root -Name $Name -BeforeWriteGuard $Guard -AlreadyLocked -ExpectedTargetBytes $expected -BeforeDeparture $departure
-}.GetNewClosure()
-Invoke-DesktopAccountSwitch -Root $root -Name $name -ConfirmAction $confirmation -SwitchAction $action", false)
+Invoke-DesktopAccountSwitch -Root $root -Name $name -ConfirmAction $confirmation -AlreadyLocked -ExpectedTargetBytes $expected -BeforeDeparture $departure", false)
                     .AddArgument(root).AddArgument(name).AddArgument(expected).AddArgument(confirm).AddArgument(departure);
                 Collection<PSObject> results = ps.Invoke();
                 if (ps.HadErrors || results.Count != 1) return Failure("Switch");
                 PSObject item = results[0];
                 return new OperationResult((bool)item.Properties["Success"].Value,
-                    (string)item.Properties["Code"].Value, (string)item.Properties["Message"].Value);
+                    (string)item.Properties["Code"].Value, (string)item.Properties["Message"].Value,
+                    TextProperty(item,"TargetUserId"),TextProperty(item,"TargetAccountId"));
             }
         }
 
@@ -132,11 +134,14 @@ Invoke-DesktopAccountSwitch -Root $root -Name $name -ConfirmAction $confirmation
                     var code = item.Properties["Code"];
                     if (success == null || !(success.Value is bool) || message == null || !(message.Value is string))
                         return Failure(command);
-                    return new OperationResult((bool)success.Value, code == null ? "" : code.Value as string ?? "", (string)message.Value);
+                    return new OperationResult((bool)success.Value, code == null ? "" : code.Value as string ?? "", (string)message.Value,
+                        TextProperty(item,"TargetUserId"),TextProperty(item,"TargetAccountId"));
                 }
             }
             catch { return Failure(command); }
         }
+        private static string TextProperty(PSObject item,string name)
+        { return item.Properties[name]==null?"":item.Properties[name].Value as string??""; }
         private static OperationResult Failure(string command)
         {
             return new OperationResult(false, "Unavailable", command == "Save-SwitchAccount"

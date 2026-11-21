@@ -10,14 +10,16 @@ namespace CodexSwitch
 {
     public sealed class CatalogEntry
     {
-        public string Name = "", AccountId = "未知", Plan = "未知", LoginType = "未知", Email = "未知";
+        public string Name = "", AccountId = "未知", UserId = "未知", Plan = "未知", LoginType = "未知", Email = "未知";
         public string SnapshotId = "", QuotaText = "尚无额度快照。", ResetHint = "", SnapshotFailure = "";
-        public bool IsCurrent, IsSaved, HasDueExhausted;
+        public string QuotaSummary = "尚无额度快照。";
+        public bool IsCurrent, IsSaved, HasDueExhausted, CurrentIdentityVerified;
         public DateTimeOffset? CapturedAtUtc;
         public DateTimeOffset? FailedAtUtc;
         public QuotaWindow[] Windows = new QuotaWindow[0];
         internal byte[] Bytes;
         internal AccountDetails Details;
+        internal string QuotaDataJson, LegacyQuotaText;
     }
 
     // 两个入口共用此服务；列举本机存档不启动进程或发送凭据。
@@ -87,9 +89,45 @@ namespace CodexSwitch
             return true;
         }
         static bool Known(string value) { return !String.IsNullOrEmpty(value) && value!="未知"; }
+        static bool ConfirmedId(string value)
+        {
+            return AccountStore.Clean(value)!=null && Known(value) &&
+                !String.Equals(value,"none",StringComparison.OrdinalIgnoreCase) &&
+                !String.Equals(value,"null",StringComparison.OrdinalIgnoreCase) &&
+                !String.Equals(value,"unknown",StringComparison.OrdinalIgnoreCase);
+        }
+        static string ClaimUser(Dictionary<string,object> claims)
+        {
+            object raw;
+            if(claims==null || claims.TryGetValue("chatgpt_user_id",out raw) && raw!=null && !(raw is string) ||
+                claims.TryGetValue("user_id",out raw) && raw!=null && !(raw is string)) return null;
+            string primary=AccountStore.Str(claims,"chatgpt_user_id"),fallback=AccountStore.Str(claims,"user_id");
+            if(primary!=null && !ConfirmedId(primary) || fallback!=null && !ConfirmedId(fallback)) return null;
+            if(primary!=null && fallback!=null && primary!=fallback) return null;
+            return primary??fallback;
+        }
+        static bool VerifyCurrentIdentity(byte[] bytes,AccountDetails details)
+        {
+            try {
+                var data=AccountStore.Json(bytes);
+                string mode=AccountStore.Str(data,"auth_mode");
+                object raw;
+                if(data.TryGetValue("auth_mode",out raw) && raw!=null && !(raw is string) ||
+                    data.TryGetValue("OPENAI_API_KEY",out raw) && raw!=null && !(raw is string)) return false;
+                if((mode!=null && mode!="chatgpt") || !String.IsNullOrEmpty(AccountStore.Str(data,"OPENAI_API_KEY"))) return false;
+                var tokens=AccountStore.Map(data,"tokens");
+                var id=AccountStore.Claims(AccountStore.Str(tokens,"id_token"));
+                var access=AccountStore.Claims(AccountStore.Str(tokens,"access_token"));
+                string account=AccountStore.Str(tokens,"account_id"),user=ClaimUser(access);
+                return details.LoginType=="ChatGPT" && ConfirmedId(account) && ConfirmedId(user) &&
+                    ClaimUser(id)==user && AccountStore.Str(id,"chatgpt_account_id")==account &&
+                    AccountStore.Str(access,"chatgpt_account_id")==account &&
+                    details.UserId==user && details.AccountId==account;
+            } catch {return false;}
+        }
         static string Identity(AccountDetails d)
         {
-            return d.LoginType=="ChatGPT" && Known(d.UserId) && Known(d.AccountId)
+            return d.LoginType=="ChatGPT" && ConfirmedId(d.UserId) && ConfirmedId(d.AccountId)
                 ? "user:"+d.UserId.Length.ToString(CultureInfo.InvariantCulture)+":"+d.UserId+":"+d.AccountId : null;
         }
         static bool Matches(CatalogEntry left,CatalogEntry right)
@@ -101,7 +139,7 @@ namespace CodexSwitch
         {
             AccountDetails d=AccountStore.Describe(bytes,name);
             return new CatalogEntry { Name=name, IsSaved=saved, Bytes=bytes, Details=d,
-                SnapshotId=d.SnapshotId, AccountId=d.AccountId, Email=d.Email, Plan=d.Plan, LoginType=d.LoginType };
+                SnapshotId=d.SnapshotId, AccountId=d.AccountId, UserId=d.UserId, Email=d.Email, Plan=d.Plan, LoginType=d.LoginType };
         }
         List<CatalogEntry> Archives()
         {
@@ -149,10 +187,13 @@ namespace CodexSwitch
                         {
                             all.Remove(representative);
                             // 轮换后展示活动登录元数据，删除确认仍核对存档摘要。
-                            representative.AccountId=active.AccountId; representative.Email=active.Email;
+                            representative.AccountId=active.AccountId; representative.UserId=active.UserId; representative.Email=active.Email;
                             representative.Plan=active.Plan; representative.LoginType=active.LoginType;
                         }
                         representative.IsCurrent=true;
+                        // Capability comes only from the bytes read from active auth.json.
+                        // A matched archive supplies its alias and deletion digest, never proof.
+                        representative.CurrentIdentityVerified=VerifyCurrentIdentity(bytes,active.Details);
                         all.Insert(0,representative);
                     }
                 }
@@ -275,7 +316,8 @@ namespace CodexSwitch
                         Persist(active,existing.IsSaved?existing:null,name);
                         quotaFailed=!Capture(active);
                     });
-                    if(result.Success && quotaFailed) return Result(true,result.Code,result.Message+" 离开账号的额度捕获失败，最近成功快照已保留。");
+                    if(quotaFailed && (result.Success || result.Code=="WorkspaceSelectionRequired"))
+                        return new OperationResult(result.Success,result.Code,result.Message+" 离开账号的额度捕获失败，最近成功快照已保留。",result.TargetUserId,result.TargetAccountId);
                     return result;
                 }
             }
@@ -356,13 +398,15 @@ namespace CodexSwitch
             try
             {
                 string json=FetchQuota(entry.Bytes);
-                string text=QuotaReader.Format(json,Known(entry.AccountId)?entry.AccountId:null,Known(entry.Details.UserId)?entry.Details.UserId:null);
+                string text=QuotaReader.Format(json,Known(entry.AccountId)?entry.AccountId:null,Known(entry.Details.UserId)?entry.Details.UserId:null,Now());
                 QuotaWindow[] windows=QuotaReader.Windows(json);
                 snapshot["captured_at"]=Now().ToString("o",CultureInfo.InvariantCulture);
                 snapshot["quota_text"]=text;
+                snapshot["quota_data"]=QuotaReader.SnapshotData(json);
                 var saved=new List<object>();
                 foreach(var w in windows) saved.Add(new Dictionary<string,object> {
-                    {"label",w.Label},{"reset_at",w.ResetAtUtc.HasValue?(object)w.ResetAtUtc.Value.ToString("o",CultureInfo.InvariantCulture):null},{"exhausted",w.Exhausted} });
+                    {"label",w.Label},{"role",w.Role},{"prefix",w.Prefix},{"limit_window_seconds",w.LimitWindowSeconds},{"used_percent",w.UsedPercent},
+                    {"reset_at",w.ResetAtUtc.HasValue?(object)w.ResetAtUtc.Value.ToString("o",CultureInfo.InvariantCulture):null},{"exhausted",w.Exhausted} });
                 snapshot["windows"]=saved;
                 snapshot.Remove("failure"); snapshot.Remove("failed_at");
                 success=true;
@@ -394,33 +438,80 @@ namespace CodexSwitch
                 entry.CapturedAtUtc=Date(AccountStore.Str(snapshot,"captured_at"));
                 entry.FailedAtUtc=Date(AccountStore.Str(snapshot,"failed_at"));
                 entry.SnapshotFailure=AccountStore.Str(snapshot,"failure")??"";
-                if(entry.CapturedAtUtc.HasValue)
-                    entry.QuotaText="快照时间："+entry.CapturedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz",CultureInfo.InvariantCulture)+Environment.NewLine+
-                        (AccountStore.Str(snapshot,"quota_text")??"额度未知。").Replace("官方额度服务（本次查询）","官方额度服务（历史快照）");
+                DateTimeOffset now=Now();
+                string original=AccountStore.Str(snapshot,"quota_text")??"额度未知。";
                 object raw;
                 var windows=new List<QuotaWindow>();
-                if(snapshot.TryGetValue("windows",out raw) && raw is object[])
+                var quotaData=AccountStore.Map(snapshot,"quota_data");
+                if(quotaData!=null)
+                {
+                    string json=new JavaScriptSerializer().Serialize(quotaData);
+                    entry.QuotaDataJson=json;
+                    windows.AddRange(QuotaReader.Windows(json));
+                    original=QuotaReader.Format(json,null,null,now);
+                }
+                else if(snapshot.TryGetValue("windows",out raw) && raw is object[])
                     foreach(object value in (object[])raw)
                     {
                         var map=value as Dictionary<string,object>;
+                        if(map==null) continue;
                         object exhausted;
-                        windows.Add(new QuotaWindow { Label=AccountStore.Clean(AccountStore.Str(map,"label"))??"额度窗口",
-                            ResetAtUtc=Date(AccountStore.Str(map,"reset_at")), Exhausted=map!=null && map.TryGetValue("exhausted",out exhausted) && exhausted is bool && (bool)exhausted });
+                        string label=AccountStore.Clean(AccountStore.Str(map,"label"))??"额度窗口";
+                        var window=new QuotaWindow { Label=label, Role=AccountStore.Str(map,"role")??"", Prefix=AccountStore.Str(map,"prefix")??"",
+                            LimitWindowSeconds=SnapshotNumber(map,"limit_window_seconds",Double.MaxValue),UsedPercent=SnapshotNumber(map,"used_percent",100),
+                            ResetAtUtc=Date(AccountStore.Str(map,"reset_at")), Exhausted=map.TryGetValue("exhausted",out exhausted) && exhausted is bool && (bool)exhausted };
+                        QuotaReader.RecoverLegacyWindow(window,label,original);
+                        windows.Add(window);
                     }
-                entry.Windows=windows.ToArray();
+                entry.Windows=QuotaReader.Order(windows.ToArray());
+                if(quotaData==null) entry.LegacyQuotaText=original;
+                if(quotaData==null && windows.Count>0) original=QuotaReader.FormatLegacySnapshot(original,entry.Windows,now);
+                entry.QuotaSummary=entry.CapturedAtUtc.HasValue?QuotaReader.CreditsSummary(original,windows.Count>0):"尚无额度快照。";
                 var hints=new List<string>();
                 foreach(var window in entry.Windows)
-                    if(window.ResetAtUtc.HasValue && window.ResetAtUtc.Value<=Now())
+                    if(window.ResetAtUtc.HasValue && window.ResetAtUtc.Value<=now)
                     {
                         if(window.Exhausted) entry.HasDueExhausted=true;
                         hints.Add(window.Label+"：快照中的重置时间已到，"+(window.Exhausted?"可能已恢复，":"")+"尚未重新查询。");
                     }
                 entry.ResetHint=String.Join(Environment.NewLine,hints.ToArray());
-                if(entry.SnapshotFailure.Length>0) entry.QuotaText+=Environment.NewLine+
-                    (entry.FailedAtUtc.HasValue?"捕获尝试："+entry.FailedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz",CultureInfo.InvariantCulture)+Environment.NewLine:"")+
-                    entry.SnapshotFailure;
+                entry.QuotaText=FormatQuotaDetails(entry,now);
             }
-            catch { entry.SnapshotFailure="额度快照无法读取，当前额度未知。"; entry.QuotaText=entry.SnapshotFailure; }
+            catch { entry.SnapshotFailure="额度快照无法读取，当前额度未知。"; entry.QuotaText=entry.SnapshotFailure; entry.QuotaSummary=entry.SnapshotFailure; }
+        }
+        public static string FormatQuotaDetails(CatalogEntry entry,DateTimeOffset now)
+        {
+            if(entry==null) return "额度未知。";
+            // Directly constructed entries may also supply structured windows.
+            if(entry.QuotaDataJson==null && entry.LegacyQuotaText==null)
+            {
+                var supplied=new StringBuilder(entry.QuotaText);
+                foreach(var window in QuotaReader.Order(entry.Windows))
+                    supplied.AppendLine().AppendLine(QuotaReader.FormatWindowSummary(window,now)).Append("重置：")
+                        .Append(window.ResetAtUtc.HasValue?window.ResetAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz",CultureInfo.InvariantCulture)+"（本地时间）":"未知");
+                return supplied.ToString();
+            }
+            string text="尚无额度快照。";
+            if(entry.CapturedAtUtc.HasValue)
+            {
+                string body=entry.QuotaDataJson!=null?QuotaReader.Format(entry.QuotaDataJson,null,null,now):
+                    entry.Windows.Length>0?QuotaReader.FormatLegacySnapshot(entry.LegacyQuotaText,entry.Windows,now):entry.LegacyQuotaText;
+                text="快照时间："+entry.CapturedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz",CultureInfo.InvariantCulture)+Environment.NewLine+
+                    body.Replace("官方额度服务（本次查询）","官方额度服务（历史快照）");
+            }
+            if(entry.SnapshotFailure.Length>0) text+=Environment.NewLine+
+                (entry.FailedAtUtc.HasValue?"捕获尝试："+entry.FailedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz",CultureInfo.InvariantCulture)+Environment.NewLine:"")+
+                entry.SnapshotFailure;
+            return text;
+        }
+        static double? SnapshotNumber(Dictionary<string,object> map,string key,double maximum)
+        {
+            object value;
+            if(!map.TryGetValue(key,out value) || value==null) return null;
+            if(!(value is int) && !(value is long) && !(value is double) && !(value is decimal)) throw new IOException("额度数值格式无效。");
+            double number=Convert.ToDouble(value,CultureInfo.InvariantCulture);
+            if(Double.IsNaN(number) || Double.IsInfinity(number) || number<0 || number>maximum || (key=="limit_window_seconds" && number==0)) throw new IOException("额度数值无效。");
+            return number;
         }
         public void Dispose() { disposed=true; }
     }

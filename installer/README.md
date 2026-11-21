@@ -1,6 +1,6 @@
 # Windows 构建和安装
 
-在 Windows x64 上运行 `build.cmd`，默认生成 0.4.2 的两个便携 EXE、自研 `installer.exe`、npm tarball 和 `SHA256SUMS.txt`。Windows 原生程序使用系统 .NET Framework 4.8 C# 编译器和 Windows PowerShell 5.1。构建 npm 格式的附件时使用 npm；仅构建原生发行物可加 `-SkipNpm`。用户下载后双击安装或使用静默安装均可离线完成。
+在 Windows x64 上运行 `build.cmd`，默认生成 0.4.3 的两个便携 EXE、自研 `installer.exe`、npm tarball 和 `SHA256SUMS.txt`。Windows 原生程序使用系统 .NET Framework 4.8 C# 编译器和 Windows PowerShell 5.1。构建 npm 格式的附件时使用 npm；仅构建原生发行物可加 `-SkipNpm`。用户下载后双击安装或使用静默安装均可离线完成。
 
 安装器编译时将最终桌面端、CLI 和卸载入口嵌入自身。两个应用继续使用相同的本地账号核心。构建记录位于 `dist/build-info.json`。安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\CodexSwitch`，管理开始菜单入口、用户 PATH 和 Windows 应用列表的卸载项。旧 MSI 的测试构建器保存在 `tests/legacy-msi`，仅用于历史兼容验证。
 

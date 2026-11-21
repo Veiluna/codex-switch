@@ -267,13 +267,64 @@ function Invoke-DesktopAccountSwitch {
         [scriptblock]$ForceClose = { param($Snapshot) Invoke-SwitchDesktopProcessAction -Snapshot $Snapshot -Force },
         [scriptblock]$Restart = { param($Snapshot) Start-SwitchDesktop -Snapshot $Snapshot },
         [ValidateRange(0,60000)][int]$ExitTimeoutMilliseconds = 5000,
-        [scriptblock]$SwitchAction = { param($Root,$Name,$Guard) Invoke-SwitchAccount -Root $Root -Name $Name -BeforeWriteGuard $Guard }
+        [scriptblock]$SwitchAction = { param($Root,$Name,$Guard) Invoke-SwitchAccount -Root $Root -Name $Name -BeforeWriteGuard $Guard -AlreadyLocked -ExpectedTargetBytes $ExpectedTargetBytes -BeforeDeparture $BeforeDeparture },
+        [switch]$AlreadyLocked,
+        [byte[]]$ExpectedTargetBytes,
+        [Action[byte[]]]$BeforeDeparture
     )
+    $lock = $null
     try {
+        if (-not (Test-SwitchName $Name) -or -not [IO.Path]::IsPathRooted($Root) -or
+            $Root -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))' -or $Root -match '^\\\\[?.]\\') {
+            return (New-SwitchResult $false $false 'InvalidPath' '账号名称或本机目录无效。')
+        }
+        # Direct script callers and the shared service use the same transaction lock.
+        # Decide the workspace route while holding it, before any process action.
+        $accounts = Join-Path $Root 'accounts'
+        $lockPath = Join-Path $accounts '.switch.lock'
+        foreach ($path in @($Root,$accounts,$lockPath)) { Assert-SwitchPath $path }
+        if (-not $AlreadyLocked) {
+            try { $lock = [IO.File]::Open($lockPath,'OpenOrCreate','ReadWrite','None') }
+            catch { return (New-SwitchResult $false $false 'Busy' '另一个保存或切换操作正在进行，或账号目录不可写，请稍后重试。') }
+        }
+        $auth = Join-Path $Root 'auth.json'
+        Assert-SwitchPath $auth
+        [byte[]]$currentBytes = $null
+        if (Test-SwitchFileExists $auth) { $currentBytes = [IO.File]::ReadAllBytes($auth) }
+        $target = $null
+        if (Test-SwitchName $Name) {
+            $candidates = @((Join-Path $accounts ($Name+'_auth.json')),(Join-Path $accounts ($Name+'.json')))
+            $found = @($candidates | Where-Object { Assert-SwitchPath $_; Test-SwitchFileExists $_ })
+            if ($found.Count -gt 1) { return (New-SwitchResult $false $false 'InvalidTarget' '存在两个同名存档，请先整理后重试。') }
+            if ($found.Count -eq 1) { $target=$found[0] }
+        }
+        [byte[]]$targetBytes = $null
+        if ($target) {
+            $targetBytes = [IO.File]::ReadAllBytes($target)
+            if ($null -ne $ExpectedTargetBytes -and -not (Test-SwitchBytesEqual $targetBytes $ExpectedTargetBytes)) { throw 'ConcurrentChange' }
+        }
+        if (-not $target) { return (New-SwitchResult $false $false 'TargetMissing' '未找到已保存的目标账号。') }
+        # The default action must consume this locked selection, even when its caller
+        # did not provide a displayed snapshot. Closing the client can take seconds.
+        if ($null -eq $ExpectedTargetBytes) { $ExpectedTargetBytes=$targetBytes }
+        $activeIdentity = Get-SwitchWorkspaceIdentity $currentBytes
+        $targetIdentity = Get-SwitchWorkspaceIdentity $targetBytes
+        if (($activeIdentity -and $activeIdentity.Conflict) -or ($targetIdentity -and $targetIdentity.Conflict)) {
+            return (New-SwitchResult $false $false 'IdentityConflict' '用户或工作空间标识互相冲突，未执行关闭或切换，请重新登录并保存。')
+        }
         $snapshot = & $GetState
         if (-not $snapshot.Known) { return (New-SwitchResult $false $false 'DesktopUnknown' '无法安全识别 Codex 桌面端，未执行关闭或切换。') }
+        if (-not (Test-SwitchSnapshot $auth ($null -ne $currentBytes) $currentBytes) -or -not (Test-SwitchSnapshot $target $true $targetBytes)) { throw 'ConcurrentChange' }
         $closedByTool = $false
         if (@($snapshot.Processes).Count -gt 0) {
+            if ($activeIdentity -and $targetIdentity -and $activeIdentity.Owner -ceq $targetIdentity.Owner -and $activeIdentity.Account -cne $targetIdentity.Account) {
+                if ($BeforeDeparture) { $BeforeDeparture.Invoke($currentBytes) }
+                if (-not (Test-SwitchSnapshot $auth $true $currentBytes) -or -not (Test-SwitchSnapshot $target $true $targetBytes)) { throw 'ConcurrentChange' }
+                # There is no authorized connection to the desktop's app-server.
+                # A new server cannot switch that existing client. Preserve its files
+                # and let its visible workspace chooser perform its own transaction.
+                return (New-SwitchResult $false $false 'WorkspaceSelectionRequired' ('Codex 保持运行，尚未确认目标工作空间已生效。请在 Codex 的账号菜单中选择存档“{0}”对应的工作空间（ID：{1}），核对后回到本工具确认。活动登录文件和当前标记保持原样。' -f $Name,$targetIdentity.Account) -TargetUserId $targetIdentity.Owner -TargetAccountId $targetIdentity.Account)
+            }
             $approval = @(& $ConfirmAction $Owner $Name 'Close')
             if ($approval.Count -ne 1 -or $approval[0] -isnot [bool] -or -not $approval[0]) {
                 return (New-SwitchResult $false $false 'Cancelled' '已取消，原登录保持不变。')
@@ -303,5 +354,8 @@ function Invoke-DesktopAccountSwitch {
             }
         } catch { $restarted = @($false) }
         return (New-SwitchResult $true $result.Changed 'RestartFailed' ('已切换到“{0}”，但未能确认 Codex 已重新打开。请手动打开 Codex。' -f $Name) $result.BackupPath)
-    } catch { return (New-SwitchResult $false $false 'DesktopFailed' '桌面端操作未完成，未执行账号切换。请检查桌面端状态后重试。') }
+    } catch {
+        if ($_.Exception.Message -ceq 'ConcurrentChange') { return (New-SwitchResult $false $false 'ConcurrentChange' '检测到登录文件或目标存档外部变更，已停止切换，请刷新后重试。') }
+        return (New-SwitchResult $false $false 'DesktopFailed' '桌面端操作未完成，未执行账号切换。请检查桌面端状态后重试。')
+    } finally { if ($lock) { $lock.Dispose() } }
 }

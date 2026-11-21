@@ -53,6 +53,54 @@ function Test-SwitchIdentityEqual {
         $Left.Account -ceq $Right.Account -and $Left.Owner -ceq $Right.Owner)
 }
 
+# A no-restart route requires consistent managed ChatGPT user AND workspace
+# metadata. Email/login_owner_id alone never establish cross-workspace ownership.
+# JWT decoding here is local metadata validation, not signature verification.
+function Get-SwitchWorkspaceIdentity {
+    param([byte[]]$Bytes)
+    try {
+        $data = ConvertFrom-SwitchJson $Bytes
+        if ($data.OPENAI_API_KEY -or ($data.auth_mode -and $data.auth_mode -cne 'chatgpt')) { return $null }
+        $tokens = $data.tokens
+        $account = $tokens.account_id
+        $user = $null
+        $complete = 0
+        foreach ($field in @('id_token','access_token')) {
+            $jwt = $tokens.$field
+            if ($jwt -isnot [string]) { continue }
+            $parts = $jwt.Split('.')
+            if ($parts.Length -ne 3 -or -not $parts[0] -or -not $parts[2]) { continue }
+            $payload = $parts[1].Replace('-','+').Replace('_','/')
+            $payload = $payload.PadRight($payload.Length + ((4 - $payload.Length % 4) % 4),'=')
+            $claims = (ConvertFrom-SwitchJson ([Convert]::FromBase64String($payload))).'https://api.openai.com/auth'
+            $claimUser=$null
+            foreach ($candidate in @($claims.chatgpt_user_id,$claims.user_id)) {
+                if ($null -eq $candidate) { continue }
+                if (-not (Test-SwitchKnownIdentityValue $candidate)) { return $null }
+                if ($user -and $user -cne $candidate) { return [pscustomobject]@{Conflict=$true} }
+                $user = $candidate
+                $claimUser = $candidate
+            }
+            $candidate = $claims.chatgpt_account_id
+            if ($candidate -is [string] -and -not [string]::IsNullOrWhiteSpace($candidate)) {
+                if ($candidate -cne $candidate.Trim() -or ($account -and $account -cne $candidate)) { return [pscustomobject]@{Conflict=$true} }
+                $account = $candidate
+            }
+            if ($claimUser -and (Test-SwitchKnownIdentityValue $candidate)) { $complete++ }
+        }
+        if ($complete -eq 2 -and (Test-SwitchKnownIdentityValue $user) -and (Test-SwitchKnownIdentityValue $account)) {
+            return [pscustomobject]@{Conflict=$false;Owner=$user;Account=$account}
+        }
+    } catch { return $null }
+    return $null
+}
+
+function Test-SwitchKnownIdentityValue {
+    param($Value)
+    return ($Value -is [string] -and -not [string]::IsNullOrWhiteSpace($Value) -and $Value.Length -le 256 -and
+        $Value -ceq $Value.Trim() -and $Value -notmatch '[\x00-\x1f\x7f]' -and $Value -notin @('None','null','unknown','未知'))
+}
+
 function Assert-SwitchPath {
     param([string]$Path)
     $itemPath = [IO.Path]::GetFullPath($Path)
@@ -169,8 +217,10 @@ function Restore-SwitchAuth {
 }
 
 function New-SwitchResult {
-    param([bool]$Success, [bool]$Changed, [string]$Code, [string]$Message, [string]$BackupPath = '')
-    [pscustomobject]@{ Success=$Success; Changed=$Changed; Code=$Code; Message=$Message; BackupPath=$BackupPath }
+    param([bool]$Success, [bool]$Changed, [string]$Code, [string]$Message, [string]$BackupPath = '',
+        [string]$TargetUserId = '', [string]$TargetAccountId = '')
+    [pscustomobject]@{ Success=$Success; Changed=$Changed; Code=$Code; Message=$Message; BackupPath=$BackupPath;
+        TargetUserId=$TargetUserId; TargetAccountId=$TargetAccountId }
 }
 
 function Invoke-SwitchAccount {

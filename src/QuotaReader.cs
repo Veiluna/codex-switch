@@ -5,6 +5,7 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace CodexSwitch
@@ -12,11 +13,13 @@ namespace CodexSwitch
     public sealed class QuotaWindow
     {
         public string Label = "";
+        public string Role = "", Prefix = "";
+        public double? LimitWindowSeconds, UsedPercent;
         public DateTimeOffset? ResetAtUtc;
         public bool Exhausted;
     }
 
-    internal static class QuotaReader
+    public static class QuotaReader
     {
         internal const string UsageEndpoint = "https://chatgpt.com/backend-api/wham/usage";
         internal const int TimeoutMilliseconds = 12000;
@@ -116,19 +119,62 @@ namespace CodexSwitch
         }
         static void AddWindows(List<QuotaWindow> output,string prefix,Dictionary<string,object> rate)
         {
-            AddWindow(output,prefix+"主要窗口",AccountStore.Map(rate,"primary_window"));
-            AddWindow(output,prefix+"次要窗口",AccountStore.Map(rate,"secondary_window"));
+            var group=new List<QuotaWindow>();
+            AddWindow(group,prefix,"primary",AccountStore.Map(rate,"primary_window"));
+            AddWindow(group,prefix,"secondary",AccountStore.Map(rate,"secondary_window"));
+            output.AddRange(Order(group.ToArray()));
         }
-        static void AddWindow(List<QuotaWindow> output,string label,Dictionary<string,object> map)
+        static void AddWindow(List<QuotaWindow> output,string prefix,string role,Dictionary<string,object> map)
         {
             if(map==null) return;
-            double? reset=Number(map,"reset_at"),used=Number(map,"used_percent");
+            double? reset=Number(map,"reset_at"),used=Number(map,"used_percent"),seconds=Number(map,"limit_window_seconds");
             if(used.HasValue && (used.Value<0 || used.Value>100)) throw new IOException("比例无效。");
+            if(seconds.HasValue && seconds.Value<=0) throw new IOException("窗口无效。");
             if(reset.HasValue && (reset.Value<0 || reset.Value!=Math.Truncate(reset.Value))) throw new IOException("重置时间无效。");
             object flag;
-            output.Add(new QuotaWindow { Label=label,
+            var window=new QuotaWindow { Prefix=prefix, Role=role, LimitWindowSeconds=seconds, UsedPercent=used,
                 ResetAtUtc=reset.HasValue?(DateTimeOffset?)new DateTimeOffset(1970,1,1,0,0,0,TimeSpan.Zero).AddSeconds(reset.Value):null,
-                Exhausted=(used.HasValue && used.Value==100) || (map.TryGetValue("limit_reached",out flag) && flag is bool && (bool)flag) });
+                Exhausted=(used.HasValue && used.Value==100) || (map.TryGetValue("limit_reached",out flag) && flag is bool && (bool)flag) };
+            window.Label=WindowLabel(window);
+            output.Add(window);
+        }
+
+        internal static QuotaWindow[] Order(QuotaWindow[] windows)
+        {
+            // Keep each service/additional quota group independent; roles never identify periods.
+            var result=new List<QuotaWindow>();
+            var prefixes=new List<string>();
+            foreach(var window in windows) if(!prefixes.Contains(window.Prefix)) prefixes.Add(window.Prefix);
+            foreach(string prefix in prefixes)
+                for(int rank=0;rank<3;rank++)
+                    foreach(var window in windows)
+                        if(window.Prefix==prefix && Rank(window)==rank) result.Add(window);
+            return result.ToArray();
+        }
+        static int Rank(QuotaWindow window) { return window.LimitWindowSeconds==604800?0:window.LimitWindowSeconds==18000?1:2; }
+        internal static string WindowLabel(QuotaWindow window)
+        {
+            string period=window.LimitWindowSeconds==604800?"周额度":window.LimitWindowSeconds==18000?"5 小时额度":
+                window.LimitWindowSeconds.HasValue?Num(window.LimitWindowSeconds.Value/60)+" 分钟额度":
+                window.Role=="primary"?"主要窗口（时长未知）":window.Role=="secondary"?"次要窗口（时长未知）":
+                String.IsNullOrEmpty(window.Label) || window.Label.EndsWith("周额度",StringComparison.Ordinal) || window.Label.EndsWith("5 小时额度",StringComparison.Ordinal)
+                    ?"额度窗口（时长未知）":window.Label;
+            return window.Prefix+period;
+        }
+        public static string FormatCountdown(DateTimeOffset? resetAtUtc,DateTimeOffset now)
+        {
+            if(!resetAtUtc.HasValue) return "未知";
+            long ticks=(resetAtUtc.Value-now).Ticks;
+            if(ticks<=0) return "00:00";
+            // Integer ceiling avoids floating point loss immediately after a minute boundary.
+            long minutes=ticks/TimeSpan.TicksPerMinute+(ticks%TimeSpan.TicksPerMinute==0?0:1);
+            return (minutes/60).ToString("00",CultureInfo.InvariantCulture)+":"+(minutes%60).ToString("00",CultureInfo.InvariantCulture);
+        }
+        public static string FormatWindowSummary(QuotaWindow window,DateTimeOffset now)
+        {
+            if(window==null) return "额度未知。";
+            return WindowLabel(window)+"：剩余 "+(window.UsedPercent.HasValue?Num(100-window.UsedPercent.Value)+"%":"未知")+
+                " · 重置倒计时 "+FormatCountdown(window.ResetAtUtc,now);
         }
 
         static bool Conflicts(Dictionary<string, object> id, Dictionary<string, object> access, string account)
@@ -214,37 +260,12 @@ namespace CodexSwitch
 
         static string Num(double value) { return value.ToString("0.##", CultureInfo.InvariantCulture); }
 
-        static string Reset(Dictionary<string, object> window)
+        static void Window(StringBuilder output,QuotaWindow window,DateTimeOffset now)
         {
-            double? reset = Number(window, "reset_at");
-            if (!reset.HasValue) return "未知";
-            if (reset.Value < 0 || reset.Value != Math.Truncate(reset.Value))
-                throw new IOException("重置时间无效。");
-            try
-            {
-                return new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero)
-                    .AddSeconds(reset.Value).ToLocalTime()
-                    .ToString("yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture) + "（本地时间）";
-            }
-            catch (ArgumentOutOfRangeException) { throw new IOException("重置时间无效。"); }
-        }
-
-        static void Window(StringBuilder output, string label, Dictionary<string, object> window)
-        {
-            if (window == null)
-            {
-                output.AppendLine(label + "：剩余未知");
-                return;
-            }
-            double? used = Number(window, "used_percent");
-            double? seconds = Number(window, "limit_window_seconds");
-            if (used.HasValue && (used.Value < 0 || used.Value > 100)) throw new IOException("比例无效。");
-            if (seconds.HasValue && seconds.Value <= 0) throw new IOException("窗口无效。");
-            output.Append(label).Append(seconds.HasValue
-                ? "（" + Num(seconds.Value / 60) + " 分钟）" : "（时长未知）");
-            output.AppendLine("：剩余 " + (used.HasValue ? Num(100 - used.Value) + "%" : "未知") +
-                "（已用 " + (used.HasValue ? Num(used.Value) + "%" : "未知") + "）");
-            output.AppendLine("重置：" + Reset(window));
+            output.AppendLine(FormatWindowSummary(window,now));
+            output.AppendLine("窗口时长："+(window.LimitWindowSeconds.HasValue?Num(window.LimitWindowSeconds.Value/60)+" 分钟":"未知")+
+                "；已用 "+(window.UsedPercent.HasValue?Num(window.UsedPercent.Value)+"%":"未知"));
+            output.AppendLine("重置："+(window.ResetAtUtc.HasValue?window.ResetAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz",CultureInfo.InvariantCulture)+"（本地时间）":"未知"));
         }
 
         static void Bool(StringBuilder output, Dictionary<string, object> map,
@@ -261,6 +282,11 @@ namespace CodexSwitch
 
         internal static string Format(string json, string expectedAccount, string expectedUser)
         {
+            return Format(json,expectedAccount,expectedUser,DateTimeOffset.UtcNow);
+        }
+
+        internal static string Format(string json,string expectedAccount,string expectedUser,DateTimeOffset now)
+        {
             var data = AccountStore.Json(AccountStore.Utf8.GetBytes(json));
             CheckIdentity(data, "account_id", expectedAccount);
             CheckIdentity(data, "user_id", expectedUser);
@@ -268,29 +294,92 @@ namespace CodexSwitch
             output.AppendLine("来源：官方额度服务（本次查询）");
             output.AppendLine("套餐：" + (AccountStore.Clean(AccountStore.Str(data, "plan_type")) ?? "未知"));
             var rate = AccountStore.Map(data, "rate_limit");
-            Window(output, "主要窗口", AccountStore.Map(rate, "primary_window"));
-            Window(output, "次要窗口", AccountStore.Map(rate, "secondary_window"));
+            QuotaWindow[] windows=Windows(json);
+            if(windows.Length==0) output.AppendLine("额度窗口：剩余未知；重置倒计时 未知");
+            foreach(var window in windows) Window(output,window,now);
             Bool(output, rate, "allowed", "普通额度使用", "允许", "不允许");
             var credits = AccountStore.Map(data, "credits");
             string balance = AccountStore.Clean(AccountStore.Str(credits, "balance"));
             output.AppendLine("Credits 余额：" + (balance ?? "未知"));
             Bool(output, credits, "unlimited", "Credits 无限额", "是", "否");
             Bool(output, credits, "has_credits", "Credits 可用", "是", "否");
-            object more;
-            if (data.TryGetValue("additional_rate_limits", out more) && more is object[])
-            {
-                foreach (object entry in (object[])more)
-                {
-                    var extra = entry as Dictionary<string, object>;
-                    if (extra == null) continue;
-                    string label = AccountStore.Clean(AccountStore.Str(extra, "limit_name")) ??
-                        AccountStore.Clean(AccountStore.Str(extra, "metered_feature")) ?? "附加额度";
-                    var extraRate = AccountStore.Map(extra, "rate_limit");
-                    Window(output, label + " / 主要窗口", AccountStore.Map(extraRate, "primary_window"));
-                    Window(output, label + " / 次要窗口", AccountStore.Map(extraRate, "secondary_window"));
-                }
-            }
             output.Append("剩余比例按 100% − 已用比例计算；Credits 余额独立展示。");
+            return output.ToString();
+        }
+
+        // Persist only fields that are displayed, rather than unknown response fields.
+        internal static Dictionary<string,object> SnapshotData(string json)
+        {
+            var data=AccountStore.Json(AccountStore.Utf8.GetBytes(json));
+            var saved=Select(data,"plan_type");
+            saved["rate_limit"]=SnapshotRate(AccountStore.Map(data,"rate_limit"));
+            saved["credits"]=Select(AccountStore.Map(data,"credits"),"balance","unlimited","has_credits");
+            object raw;
+            var extras=new List<object>();
+            if(data.TryGetValue("additional_rate_limits",out raw) && raw is object[])
+                foreach(object value in (object[])raw)
+                {
+                    var map=value as Dictionary<string,object>;
+                    if(map==null) continue;
+                    var extra=Select(map,"limit_name","metered_feature");
+                    extra["rate_limit"]=SnapshotRate(AccountStore.Map(map,"rate_limit"));
+                    extras.Add(extra);
+                }
+            saved["additional_rate_limits"]=extras;
+            return saved;
+        }
+        static Dictionary<string,object> SnapshotRate(Dictionary<string,object> rate)
+        {
+            var result=Select(rate,"allowed");
+            foreach(string key in new[] {"primary_window","secondary_window"})
+            {
+                var window=AccountStore.Map(rate,key);
+                if(window!=null) result[key]=Select(window,"used_percent","limit_window_seconds","reset_at","limit_reached");
+            }
+            return result;
+        }
+        static Dictionary<string,object> Select(Dictionary<string,object> map,params string[] keys)
+        {
+            var result=new Dictionary<string,object>();
+            if(map!=null) foreach(string key in keys) {object value; if(map.TryGetValue(key,out value)) result[key]=value;}
+            return result;
+        }
+
+        internal static string CreditsSummary(string text,bool hasWindows)
+        {
+            Match credits=Regex.Match(text??"",@"(?m)^Credits 余额：[^\r\n]*");
+            return (hasWindows?"":"额度未知；")+(credits.Success?credits.Value:"Credits 余额：未知");
+        }
+
+        internal static void RecoverLegacyWindow(QuotaWindow window,string originalLabel,string text)
+        {
+            string primary="主要窗口",secondary="次要窗口";
+            if(originalLabel.EndsWith(primary,StringComparison.Ordinal)) {window.Role="primary"; window.Prefix=originalLabel.Substring(0,originalLabel.Length-primary.Length);}
+            else if(originalLabel.EndsWith(secondary,StringComparison.Ordinal)) {window.Role="secondary"; window.Prefix=originalLabel.Substring(0,originalLabel.Length-secondary.Length);}
+            // Match the old role's exact line, never the display position after sorting.
+            MatchCollection lines=Regex.Matches(text??"",@"(?m)^"+Regex.Escape(originalLabel)+@"(?:（(?<minutes>[0-9]+(?:\.[0-9]+)?) 分钟）|（时长未知）)?：[^\r\n]*");
+            if(lines.Count==1)
+            {
+                double minutes;
+                if(!window.LimitWindowSeconds.HasValue && Double.TryParse(lines[0].Groups["minutes"].Value,NumberStyles.AllowDecimalPoint,CultureInfo.InvariantCulture,out minutes) && minutes>0)
+                    window.LimitWindowSeconds=minutes*60;
+                Match used=Regex.Match(lines[0].Value,@"已用 (?<used>[0-9]+(?:\.[0-9]+)?)%");
+                double percent;
+                if(!window.UsedPercent.HasValue && used.Success && Double.TryParse(used.Groups["used"].Value,NumberStyles.AllowDecimalPoint,CultureInfo.InvariantCulture,out percent) && percent>=0 && percent<=100)
+                    window.UsedPercent=percent;
+            }
+            window.Label=WindowLabel(window);
+        }
+
+        internal static string FormatLegacySnapshot(string text,QuotaWindow[] windows,DateTimeOffset now)
+        {
+            var output=new StringBuilder();
+            foreach(var window in windows) Window(output,window,now);
+            // Remove recognized old/new quota blocks before regenerating them from observations.
+            var labels=new List<string> {@"[^\r\n]*?(?:主要窗口|次要窗口)(?:（[^\r\n]*?）)?"};
+            foreach(var window in windows) labels.Add(Regex.Escape(WindowLabel(window)));
+            string metadata=Regex.Replace(text??"",@"(?m)^(?:"+String.Join("|",labels.ToArray())+@")：[^\r\n]*(?:\r?\n窗口时长：[^\r\n]*)?(?:\r?\n重置：[^\r\n]*)?\r?\n?","");
+            output.Append(metadata);
             return output.ToString();
         }
 

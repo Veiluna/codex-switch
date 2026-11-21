@@ -2,7 +2,7 @@
 
 在 Windows 上用桌面窗口或 cmd 管理本机 Codex 账号。当前登录始终置顶，选择另一行可以先核对邮箱、账号 ID、套餐和额度快照，再决定是否切换。
 
-![账号详情示例：alpha 是当前登录，右侧显示 beta 的邮箱、账号 ID、历史额度及重置时间](docs/design/v042-details.png)
+![账号详情示例，右侧按周、5 小时的顺序显示额度和重置倒计时](docs/design/v043-details.png)
 
 ## 下载与启动
 
@@ -13,7 +13,7 @@
 | 文件 | 用法 |
 | --- | --- |
 | `installer.exe` | 双击打开图形安装器。为当前用户安装两个入口后，可从开始菜单打开桌面端，在新终端运行 `codex-switch`。 |
-| `veiluna-codex-switch-0.4.2.tgz` | npm 格式的 Windows x64 包，内含同版 CLI 及安装器，支持 npm 和 npx。 |
+| `veiluna-codex-switch-0.4.3.tgz` | npm 格式的 Windows x64 包，内含同版 CLI 及安装器，支持 npm 和 npx。 |
 | `CodexSwitch.exe` | 便携桌面端。双击打开。 |
 | `codex-switch.exe` | 便携命令行。可在 cmd 或 PowerShell 中单独运行。 |
 
@@ -34,17 +34,17 @@ PowerShell 可用 `(Start-Process .\installer.exe -ArgumentList 'install','--qui
 
 ### 用 npm 或 npx 获取
 
-以下为后续通过安全验收的版本保留安装示例。将 `X.Y.Z` 替换为已核验的新版本号，在下载目录打开终端。长期使用 CLI 可执行：
+在 GitHub 发布页下载本版的 `.tgz`，在下载目录打开终端。长期使用 CLI 可执行：
 
 ```console
-npm install --global ".\veiluna-codex-switch-X.Y.Z.tgz"
+npm install --global ".\veiluna-codex-switch-0.4.3.tgz"
 codex-switch --help
 ```
 
 偶尔使用可直接运行一次：
 
 ```console
-npx --yes --package=".\veiluna-codex-switch-X.Y.Z.tgz" -- codex-switch list
+npx --yes --package=".\veiluna-codex-switch-0.4.3.tgz" -- codex-switch list
 ```
 
 将末尾的 `codex-switch list` 换成 `codex-switch-install` 可打开图形安装器，换成 `codex-switch-install install --quiet` 可静默安装。Windows 安装器管理桌面安装，npm 管理由它安装的命令入口，可用 `npm uninstall --global @veiluna/codex-switch` 移除。
@@ -57,7 +57,11 @@ npx --yes --package=".\veiluna-codex-switch-X.Y.Z.tgz" -- codex-switch list
 
 ## 切换与额度
 
-如果 Codex 桌面端正在运行，工具会询问是否正常关闭。正常退出超时后，强制结束需要单独确认，可能中断任务。原桌面端成功关闭后，工具读取最后写入的活动凭据，保存原账号，采集它的额度快照，再切换本地登录并尝试重开原桌面端。原本已关闭时保持关闭。
+**切换不同账号。** 在图形界面点击切换后，工具直接请求正在运行的 Codex 正常退出。只有退出超时、需要强制结束进程时才询问一次。退出后工具保存原账号最后写入的凭据和额度，再切换并尝试重开客户端。客户端原本已关闭时，直接切换本地登录。
+
+**同一账号切换个人空间和工作空间。** 如果客户端正在运行且可以核实两个空间属于同一用户，工具保存离开前的快照，保持 Codex 打开。按提示在 Codex 的账号菜单中选择目标空间，回到切换器后会自动核对当前身份，也可以点击刷新。只有读到目标用户和空间才显示切换成功。
+
+**额度。** 有周期信息的快照优先显示周额度，其次是 5 小时额度。重置倒计时按总小时和分钟显示，例如 `125:08` 表示还有 125 小时 8 分钟；最后不足一分钟显示 `00:01`，到点显示 `00:00`。缺少重置时间时显示未知。
 
 凭据保存失败会中止切换。额度服务不可用时继续切换，并保留上一次成功采集的数值、时间及最近失败记录。浏览、搜索和刷新账号列表仅重读本机信息。窗口重置点到达时显示提醒，实际剩余量以之后取得的新快照为准。API 密钥的账单额度请通过其计费渠道查询。[数据来源与字段](docs/native-account-data.md)
 
@@ -75,7 +79,7 @@ codex-switch switch "备用账号"
 codex-switch delete "旧账号"
 ```
 
-直接在终端运行可用方向键与 Enter 选择，Esc 退出。输出重定向时显示名单。账号名也可作为快捷切换命令。无人值守脚本用 `--allow-close` 授权正常退出，确实接受强制结束时另加 `--force-close`。脚本删除需加 `--yes`。退出码 0 表示成功，1 表示操作失败或取消，2 表示参数错误。使用 `--root "绝对目录"` 可指定独立目录，完整选项见 `codex-switch --help`。
+直接在终端运行可用方向键与 Enter 选择，Esc 退出。输出重定向时显示名单。账号名也可作为快捷切换命令。无人值守脚本用 `--allow-close` 授权正常退出，确实接受强制结束时另加 `--force-close`。脚本删除需加 `--yes`。退出码 0 表示成功，1 表示操作未完成（包括需要到 Codex 选择工作空间），2 表示参数错误。手动选好工作空间后可运行 `codex-switch current` 核对。使用 `--root "绝对目录"` 可指定独立目录，完整选项见 `codex-switch --help`。
 
 ## 从源码构建
 

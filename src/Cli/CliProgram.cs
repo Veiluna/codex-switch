@@ -143,6 +143,9 @@ namespace CodexSwitch
                 Console.WriteLine((entry.IsCurrent ? "* " : "  ") + Safe(entry.Name) +
                     (entry.IsCurrent ? " [当前登录]" : "") + (!entry.IsSaved ? " [未保存]" : "") +
                     " | " + Value(entry.Email) + " | " + Value(entry.Plan));
+                foreach(QuotaWindow window in entry.Windows)
+                    Console.WriteLine("    "+Safe(QuotaReader.FormatWindowSummary(window,DateTimeOffset.UtcNow)));
+                Console.WriteLine("    "+Value(entry.QuotaSummary));
                 string reset = ResetStatus(entry);
                 if (reset.Length > 0) Console.WriteLine("    " + reset);
             }
@@ -201,7 +204,7 @@ namespace CodexSwitch
             Console.WriteLine("账号 ID：" + Value(entry.AccountId));
             Console.WriteLine("套餐：" + Value(entry.Plan));
             Console.WriteLine("登录类型：" + Value(entry.LoginType));
-            Console.WriteLine("额度快照：\n" + Value(entry.QuotaText));
+            Console.WriteLine("额度快照：\n" + Value(AccountService.FormatQuotaDetails(entry,DateTimeOffset.UtcNow)));
             string reset = ResetStatus(entry);
             if (reset.Length > 0) Console.WriteLine(reset);
             return 0;
@@ -237,9 +240,13 @@ namespace CodexSwitch
             {
                 Console.WriteLine("\n↑/↓ 选择账号，Enter 切换，Esc 退出");
                 for (int i = 0; i < choices.Count; i++)
+                {
                     Console.WriteLine((selected == i ? "> " : "  ") + Safe(choices[i].Name) +
                         (choices[i].IsCurrent ? " [当前登录]" : "") +
                         (ResetStatus(choices[i]).Length == 0 ? "" : " · " + ResetStatus(choices[i])));
+                    foreach(QuotaWindow window in choices[i].Windows)
+                        Console.WriteLine("    "+Safe(QuotaReader.FormatWindowSummary(window,DateTimeOffset.UtcNow)));
+                }
                 ConsoleKey key = Console.ReadKey(true).Key;
                 if (key == ConsoleKey.Escape) return 0;
                 if (key == ConsoleKey.UpArrow) selected = (selected + choices.Count - 1) % choices.Count;
