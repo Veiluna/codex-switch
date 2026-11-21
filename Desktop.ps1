@@ -1,5 +1,7 @@
 ﻿# Desktop discovery never reads account data. Only the current session and the
 # verified current-user MSIX application's exact executable are eligible.
+. (Join-Path $PSScriptRoot 'UiStyle.ps1')
+
 function Initialize-SwitchDesktopNative {
     if ('CodexSwitch.NativePackage' -as [type]) { return }
     Add-Type -TypeDefinition @'
@@ -141,16 +143,116 @@ function Start-SwitchDesktop {
     return $false
 }
 
+function Show-SwitchNotice {
+    param($Owner, [string]$Title, [string]$Message,
+        [ValidateSet('Confirm','Force','Result')][string]$Mode = 'Result')
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $palette = Get-SwitchPalette
+    $dialog = New-Object Windows.Forms.Form
+    try {
+        $dialog.Name = 'SwitchNoticeDialog'
+        $dialog.Text = 'Codex 账号切换'
+        $dialog.FormBorderStyle = 'FixedDialog'
+        $dialog.MaximizeBox = $false
+        $dialog.MinimizeBox = $false
+        $dialog.ShowIcon = $false
+        $dialog.ShowInTaskbar = $false
+        $dialog.BackColor = $palette.Surface
+        $dialog.ForeColor = $palette.Ink
+        $dialog.Font = New-Object Drawing.Font('Microsoft YaHei UI', 10)
+        $dialog.AutoScaleMode = 'Font'
+        $dialog.StartPosition = if ($Owner) { 'CenterParent' } else { 'CenterScreen' }
+        $screen = if ($Owner) { [Windows.Forms.Screen]::FromControl($Owner) } else { [Windows.Forms.Screen]::PrimaryScreen }
+        $width = [Math]::Min(520, [Math]::Max(340, $screen.WorkingArea.Width - 48))
+        $contentWidth = $width - 48
+        $flags = [Windows.Forms.TextFormatFlags]::WordBreak -bor [Windows.Forms.TextFormatFlags]::NoPrefix
+        $heading = New-Object Windows.Forms.Label
+        $heading.Name = 'NoticeTitle'
+        $heading.Text = $Title
+        $heading.UseMnemonic = $false
+        $heading.Font = New-Object Drawing.Font('Microsoft YaHei UI', 14, [Drawing.FontStyle]::Bold)
+        $heading.Location = New-Object Drawing.Point(24, 22)
+        $headingHeight = [Math]::Max(30, [Windows.Forms.TextRenderer]::MeasureText($Title, $heading.Font, (New-Object Drawing.Size($contentWidth, 300)), $flags).Height)
+        $heading.Size = New-Object Drawing.Size($contentWidth, $headingHeight)
+        $dialog.Controls.Add($heading)
+
+        # Short notices look like selectable paragraphs. Longer names and results
+        # retain their complete text and gain a vertical scrollbar when needed.
+        $body = New-Object Windows.Forms.TextBox
+        $body.Name = 'NoticeMessage'
+        $body.AccessibleName = '提示内容'
+        $body.Multiline = $true
+        $body.ReadOnly = $true
+        $body.WordWrap = $true
+        $body.AcceptsTab = $false
+        $body.BorderStyle = 'None'
+        $body.BackColor = $palette.Surface
+        $body.ForeColor = $palette.Muted
+        $body.Font = $dialog.Font
+        $body.Text = $Message
+        $body.Location = New-Object Drawing.Point(24, ($heading.Bottom + 14))
+        $maximumBody = [Math]::Max(64, [Math]::Min(420, ($screen.WorkingArea.Height - $body.Top - 150)))
+        $body.Size = New-Object Drawing.Size($contentWidth, $maximumBody)
+        $body.ScrollBars = 'Vertical'
+        $dialog.Controls.Add($body)
+        # Ask the native edit control for physical wrapped lines. GDI's generic
+        # WordBreak measurement can treat an unbroken account alias as one line.
+        $null = $body.Handle
+        $measured = ($body.GetLineFromCharIndex($body.TextLength) + 1) * $body.Font.Height + 12
+        $bodyHeight = [Math]::Max(48, [Math]::Min($maximumBody, $measured))
+        $body.Size = New-Object Drawing.Size($contentWidth, $bodyHeight)
+        $body.ScrollBars = if ($measured -gt $maximumBody) { 'Vertical' } else { 'None' }
+
+        $actions = New-Object Windows.Forms.Panel
+        $actions.Name = 'NoticeActions'
+        $actions.Location = New-Object Drawing.Point(24, ($body.Bottom + 24))
+        $actions.Size = New-Object Drawing.Size($contentWidth, 38)
+        $dialog.Controls.Add($actions)
+        $cancel = New-Object Windows.Forms.Button
+        $cancel.Name = if ($Mode -eq 'Result') { 'NoticeClose' } else { 'NoticeCancel' }
+        $cancel.Text = if ($Mode -eq 'Result') { '知道了' } else { '取消' }
+        $cancel.Size = New-Object Drawing.Size(94, 38)
+        $cancel.DialogResult = [Windows.Forms.DialogResult]::Cancel
+        Set-SwitchButtonStyle -Button $cancel -Role $(if ($Mode -eq 'Result') { 'Primary' } else { 'Secondary' })
+        if ($Mode -eq 'Result') {
+            $cancel.Location = New-Object Drawing.Point(($contentWidth - $cancel.Width), 0)
+        } else {
+            $action = New-Object Windows.Forms.Button
+            $action.Name = 'NoticeAction'
+            $action.Text = if ($Mode -eq 'Force') { '强制关闭并切换' } else { '退出并切换' }
+            $action.Size = New-Object Drawing.Size(156, 38)
+            $action.Location = New-Object Drawing.Point(($contentWidth - $action.Width), 0)
+            $action.DialogResult = [Windows.Forms.DialogResult]::OK
+            $action.TabIndex = 1
+            Set-SwitchButtonStyle -Button $action -Role $(if ($Mode -eq 'Force') { 'Danger' } else { 'Primary' })
+            $actions.Controls.Add($action)
+            $cancel.Location = New-Object Drawing.Point(($action.Left - 10 - $cancel.Width), 0)
+        }
+        $cancel.TabIndex = 0
+        $actions.Controls.Add($cancel)
+        $body.TabIndex = 1
+        $actions.TabIndex = 0
+        $dialog.ClientSize = New-Object Drawing.Size($width, ($actions.Bottom + 24))
+        # Enter, Escape and title-bar dismissal never approve a process action.
+        # Only selecting the named action button can return OK.
+        $dialog.AcceptButton = $cancel
+        $dialog.CancelButton = $cancel
+        $dialog.ActiveControl = $cancel
+        $dialog.Add_Shown({ $cancel.Select() }.GetNewClosure())
+        $answer = if ($Owner) { $dialog.ShowDialog($Owner) } else { $dialog.ShowDialog() }
+        return [bool]($Mode -ne 'Result' -and $answer -eq [Windows.Forms.DialogResult]::OK)
+    } finally { $dialog.Dispose() }
+}
+
 function Confirm-SwitchDesktop {
     param($Owner, [string]$Name, [string]$Phase)
-    Add-Type -AssemblyName System.Windows.Forms
     $message = if ($Phase -eq 'Force') {
-        'Codex 未能正常退出。强制关闭可能中断正在执行的任务。是否强制关闭已识别的 Codex 桌面端，然后切换到“{0}”？' -f $Name
-    } else { '是否关闭 Codex 桌面端并切换到“{0}”？切换成功后将重新打开 Codex。' -f $Name }
-    $answer = if ($Owner) {
-        [System.Windows.Forms.MessageBox]::Show($Owner, $message, '切换 Codex 账号', 'YesNo', 'Warning', 'Button2')
-    } else { [System.Windows.Forms.MessageBox]::Show($message, '切换 Codex 账号', 'YesNo', 'Warning', 'Button2') }
-    return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
+        ('目标账号为“{0}”。' + [Environment]::NewLine + 'Codex 未能正常退出。将仅强制关闭已识别的 Codex 桌面端，这可能中断正在执行的任务；切换成功后将重新打开 Codex。') -f $Name
+    } else { ('目标账号为“{0}”。' + [Environment]::NewLine + '将先退出 Codex，切换成功后重新打开。') -f $Name }
+    $mode = if ($Phase -eq 'Force') { 'Force' } else { 'Confirm' }
+    $title = if ($Phase -eq 'Force') { '强制关闭 Codex 并切换账号？' } else { '退出 Codex 并切换账号？' }
+    return (Show-SwitchNotice -Owner $Owner -Title $title -Message $message -Mode $mode)
 }
 
 function Invoke-DesktopAccountSwitch {
@@ -164,7 +266,8 @@ function Invoke-DesktopAccountSwitch {
         [scriptblock]$RequestClose = { param($Snapshot) Invoke-SwitchDesktopProcessAction -Snapshot $Snapshot },
         [scriptblock]$ForceClose = { param($Snapshot) Invoke-SwitchDesktopProcessAction -Snapshot $Snapshot -Force },
         [scriptblock]$Restart = { param($Snapshot) Start-SwitchDesktop -Snapshot $Snapshot },
-        [ValidateRange(0,60000)][int]$ExitTimeoutMilliseconds = 5000
+        [ValidateRange(0,60000)][int]$ExitTimeoutMilliseconds = 5000,
+        [scriptblock]$SwitchAction = { param($Root,$Name,$Guard) Invoke-SwitchAccount -Root $Root -Name $Name -BeforeWriteGuard $Guard }
     )
     try {
         $snapshot = & $GetState
@@ -191,7 +294,7 @@ function Invoke-DesktopAccountSwitch {
             }
         }
         $guard = { $latest = & $GetState; return [bool]($latest.Known -and @($latest.Processes).Count -eq 0) }.GetNewClosure()
-        $result = Invoke-SwitchAccount -Root $Root -Name $Name -BeforeWriteGuard $guard
+        $result = & $SwitchAction $Root $Name $guard
         if (-not $result.Success -or -not $closedByTool) { return $result }
         try {
             $restarted = @(& $Restart $snapshot)

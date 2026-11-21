@@ -128,7 +128,7 @@ try { [void]$form.ShowDialog() } finally { $form.Dispose() }
         if (-not $window) { throw 'GUI launcher did not create a window within 12 seconds.' }
         if ($window.Current.ProcessId -eq $decoyProcess.Id) { throw 'Same-title isolation failed.' }
         if ($window.Current.IsOffscreen) { throw 'GUI window is offscreen.' }
-        Assert-VisibleText '已保存的账号'
+        Assert-VisibleText '目标账号'
         # On this Windows runtime UIA exposes the classic ListBox as a Pane.
         # Read only our newly launched fixture window's list through LB_GET*.
         $list = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) |

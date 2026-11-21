@@ -1,43 +1,49 @@
 # Codex 账号切换器
 
-在 Windows 本地窗口中，为当前 Codex 登录起名保存，以后点击账号名称即可切换。已有的 `<名称>_auth.json` 和 `<名称>.json` 存档会自动出现在列表里。
+在 Windows 上用桌面窗口或 cmd 管理本机 Codex 账号。当前登录始终置顶，选择另一行可以先核对邮箱、账号 ID、套餐和额度快照，再决定是否切换。
 
-![Windows 切换窗口，列表中是两个演示账号](docs/window.png)
+![虚构账号演示，alpha 为当前登录，右侧显示 beta 的历史额度](docs/design/v03-ui-synthetic.png)
 
 ## 下载与启动
 
-1. 在 [GitHub Releases](https://github.com/Veiluna/codex-switch/releases) 下载 `codex-switch-windows.zip`。
-2. 把 ZIP 完整解压到一个文件夹。双击其中的 **Open-Codex-Switch.cmd**。
-3. 第一次使用时，先在 Codex 中登录，点击窗口中的 **保存当前登录**，输入一个便于辨认的名称。已有存档的用户可以直接点击列表中的账号。
+从 [GitHub Releases](https://github.com/Veiluna/codex-switch/releases/latest) 下载 Windows x64 版本。
 
-工具使用 Windows PowerShell 5.1 和 Windows Forms。切换依赖 Codex 的本地文件凭据模式，默认使用 `%USERPROFILE%\.codex\auth.json`，也支持用 `CODEX_HOME` 指定目录。使用系统凭据库的配置不能通过替换这个文件完成切换。
-
-## 点击账号后会发生什么
-
-| 当前状态 | 工具行为 |
+| 文件 | 用法 |
 | --- | --- |
-| Codex 桌面端已关闭 | 切换本机凭据，保持桌面端关闭。 |
-| Codex 桌面端正在运行 | 显示目标名称并请求确认。确认后尝试正常退出，成功切换后重新打开桌面端。 |
-| 桌面端未能正常退出 | 再次询问是否强制关闭。强制关闭可能中断正在运行的任务。选择取消会保留原登录。 |
-| 已切换但桌面端重开失败 | 窗口会单独报告重启结果，可以自行从开始菜单打开 Codex。 |
+| `CodexSwitch-0.3.0-x64.msi` | 为当前用户安装两个入口。从开始菜单打开桌面端，在新开的终端输入 `codex-switch`。 |
+| `CodexSwitch.exe` | 便携桌面端。双击打开。 |
+| `codex-switch.exe` | 便携命令行。可在 cmd 或 PowerShell 中单独运行。 |
 
-账号名称是本机存档的别名。工具不验证在线订阅状态。真实凭据保存在本机 Codex 目录中，分享本工具时请使用发布 ZIP，不要分享个人的 `auth.json`、`accounts` 或登录备份。
+使用系统 .NET Framework 4.8 和 Windows PowerShell 5.1。分发文件未签名，发布页提供 SHA-256。安装、升级和卸载均保留账号目录。需要使用 Codex 的本地文件凭据，默认目录为 `%USERPROFILE%\.codex`，也可以指定 `CODEX_HOME`。
+
+## 第一次使用
+
+1. 在 Codex 中正常登录。回到切换器，点击搜索框右侧的刷新箭头，查看当前登录身份。
+2. 点击 **保存当前登录**。默认名称为邮箱，也可以自行命名。再次保存可验证为同一身份的账号时更新已有存档。工具兼容已有的 `<名称>_auth.json` 和 `<名称>.json`。
+3. 在列表中选择目标，在右侧核对详情后点击 **切换到此账号**。蓝色标记指示当前登录，所选行决定右侧显示的详情。要移除本地存档，选择 **删除账号** 并核对名称。
+
+## 切换与额度
+
+如果 Codex 桌面端正在运行，工具会询问是否正常关闭。正常退出超时后，强制结束需要单独确认，可能中断任务。原桌面端成功关闭后，工具读取最后写入的活动凭据，保存原账号，采集它的额度快照，再切换本地登录并尝试重开原桌面端。原本已关闭时保持关闭。
+
+凭据保存失败会中止切换。额度服务不可用时继续切换，并保留上一次成功采集的数值、时间及最近失败记录。浏览、搜索和刷新账号列表仅重读本机信息。窗口重置点到达时显示提醒，实际剩余量以之后取得的新快照为准。API 密钥的账单额度请通过其计费渠道查询。[数据来源与字段](docs/native-account-data.md)
+
+切换前的本地备份保存在 `accounts\backup-…_auth.json`。个人 `auth.json`、存档和备份均含敏感凭据，请单独保管。需要恢复时先退出 Codex，另存当前活动文件，再用选定备份恢复它。
 
 ## 命令行
 
-在解压目录打开 PowerShell：
-
-```powershell
-.\codex-switch.cmd
-.\codex-switch.cmd "工作账号"
+```cmd
+codex-switch
+codex-switch list
+codex-switch current
+codex-switch show "工作账号"
+codex-switch save "工作账号"
+codex-switch switch "备用账号"
+codex-switch delete "旧账号"
 ```
 
-第一条列出已保存的名称，第二条在桌面端已退出时切换。需要由工具协助退出和重启桌面端时，使用图形窗口。
+直接在终端运行可用方向键与 Enter 选择，Esc 退出。输出重定向时显示名单。账号名也可作为快捷切换命令。无人值守脚本用 `--allow-close` 授权正常退出，确实接受强制结束时另加 `--force-close`。脚本删除需加 `--yes`。退出码 0 表示成功，1 表示操作失败或取消，2 表示参数错误。使用 `--root "绝对目录"` 可指定独立目录，完整选项见 `codex-switch --help`。
 
-## 备份和恢复
+## 从源码构建
 
-切换器把原活动登录备份到 `accounts\backup-…_auth.json`，备份不会出现在窗口里。文件中可能含有可用的登录凭据，请与其他账号文件一同保管。工具只在能确认归属时将已刷新的凭据写回具名存档。若提示需要恢复，请先退出 Codex，保存现有 `auth.json` 副本，再用对应的本地备份恢复该文件。
-
-## 开发记录
-
-首版的验收标准、使用虚构账号的测试，以及实际桌面验证的范围见[票据索引](https://github.com/Veiluna/codex-switch/blob/main/docs/v1-ticket-draft.md)。
+在 Windows x64 上运行 `build.cmd`。产物和构建记录位于 `dist`。两个 C# 入口使用同一份共享核心；其中嵌入已经验证的 PowerShell 文件操作和桌面管理代码。构建与安装验证见[分发说明](installer/README.md)。本轮需求、分票和验收在 [0.3 规格议题](https://github.com/Veiluna/codex-switch/issues/1) 中追踪。

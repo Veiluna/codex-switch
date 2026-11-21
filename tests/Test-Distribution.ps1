@@ -26,10 +26,10 @@ try {
     [void][IO.Directory]::CreateDirectory($fixture)
     $package = Join-Path $fixture 'clean extracted package'
     [void][IO.Directory]::CreateDirectory($package)
-    $allowed = @('AccountList.ps1','AccountSwitch.ps1','Desktop.ps1','Open-Codex-Switch.cmd','SaveAccount.ps1','Window.ps1','codex-switch.cmd','switch-account.ps1','README.md','docs/window.png')
+    $allowed = @('AccountList.ps1','AccountSwitch.ps1','Desktop.ps1','Open-Codex-Switch.cmd','SaveAccount.ps1','UiStyle.ps1','Window.ps1','codex-switch.cmd','switch-account.ps1','README.md','docs/window.png')
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($archivePath)
-    Assert-Distribution ($zip.Entries.Count -eq $allowed.Count) 'ZIP must contain exactly the ten distribution files'
+    Assert-Distribution ($zip.Entries.Count -eq $allowed.Count) 'ZIP must contain exactly the eleven distribution files'
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $boundary = [IO.Path]::GetFullPath($package) + [IO.Path]::DirectorySeparatorChar
     # Validate every entry before writing any entry. Directory links are never restored.
@@ -50,19 +50,20 @@ try {
     # Load only extracted product scripts. Tests/Test-Save.ps1 and Test-Switch.ps1
     # separately cover cancellation and natural row-click behavior in greater depth.
     . (Join-Path $package 'Window.ps1')
-    foreach ($function in @('New-SwitchWindow','Save-SwitchAccount','Invoke-SwitchAccount','Invoke-DesktopAccountSwitch')) {
+    foreach ($function in @('New-SwitchWindow','Save-SwitchAccount','Invoke-SwitchAccount','Invoke-DesktopAccountSwitch','Set-SwitchButtonStyle','Show-SwitchNotice')) {
         Assert-Distribution ((Get-Command $function).ScriptBlock.File.StartsWith($boundary, [StringComparison]::OrdinalIgnoreCase)) 'All exercised functions must come from the extracted ZIP'
     }
     $fakeRoot = Join-Path $fixture 'fake .codex'
     [void][IO.Directory]::CreateDirectory($fakeRoot)
     $auth = Join-Path $fakeRoot 'auth.json'
     $accounts = Join-Path $fakeRoot 'accounts'
-    $observed = [pscustomobject]@{ StateReads=0; UnexpectedActions=0; Result=$null }
+    $observed = [pscustomobject]@{ ActionCalls=0; StateReads=0; UnexpectedActions=0; Result=$null }
     # Explicitly injected CLOSED state: this test never discovers, closes or restarts real Codex.
     $closed = { $observed.StateReads++; [pscustomobject]@{Known=$true; Processes=@(); LaunchId=$null} }.GetNewClosure()
     $forbidden = { $observed.UnexpectedActions++; throw 'A closed-desktop distribution test must not confirm, close or restart a desktop.' }.GetNewClosure()
     $action = {
         param($Root, $Name)
+        $observed.ActionCalls++
         $observed.Result = Invoke-DesktopAccountSwitch -Root $Root -Name $Name -GetState $closed -ConfirmAction $forbidden -RequestClose $forbidden -ForceClose $forbidden -Restart $forbidden
         return $observed.Result
     }.GetNewClosure()
@@ -81,6 +82,13 @@ try {
             $dialog.Controls['ConfirmSaveButton'].PerformClick()
         }
     })
+    $assertPreviewPassive = {
+        param([string]$ExpectedBytes)
+        Assert-Distribution ($observed.ActionCalls -eq 0 -and $observed.StateReads -eq 0 -and $observed.UnexpectedActions -eq 0) 'Packaged save, selection and search never invoke the switch workflow'
+        Assert-Distribution ((Read-DistributionBytes $auth) -ceq $ExpectedBytes) 'Packaged save, selection and search preserve active credential bytes'
+        Assert-Distribution (-not (Test-Path -LiteralPath (Join-Path $accounts '.current'))) 'Packaged preview never records an active account'
+        Assert-Distribution (@(Get-ChildItem -LiteralPath $accounts -File -Filter 'backup-*_auth.json').Count -eq 0) 'Packaged preview creates no switch backup'
+    }.GetNewClosure()
     $snapshots = @{}
     foreach ($name in @('分发账号甲','分发账号乙')) {
         [IO.File]::WriteAllText($auth, ('{"fake_distribution_account":"' + $name + '","unknown":{"preserve":true}}'), (New-Object Text.UTF8Encoding($false)))
@@ -90,9 +98,27 @@ try {
         $window.SaveButton.PerformClick()
         Assert-Distribution $timer.Tag.Seen 'Packaged save button opens its actual input dialog'
         Assert-Distribution ($window.AccountList.Items.Contains($name)) 'Packaged save refreshes the visible list'
+        Assert-Distribution ($window.AccountList.SelectedItem -ceq $name) 'Packaged save selects the newly saved alias for preview'
+        Assert-Distribution ($window.DetailNameLabel.Text -ceq $name) 'Packaged detail displays the newly saved alias'
         Assert-Distribution ((Read-DistributionBytes (Join-Path $accounts ($name + '_auth.json'))) -ceq $snapshots[$name]) 'Packaged save preserves the complete fake credential bytes'
+        & $assertPreviewPassive $snapshots[$name]
     }
+    Assert-Distribution ($null -ne $window.SearchBox) 'Packaged window exposes the account search box'
     $window.AccountList.SelectedItem = '分发账号甲'
+    Assert-Distribution ($window.DetailNameLabel.Text -ceq '分发账号甲') 'Packaged selection updates the detail name'
+    & $assertPreviewPassive $snapshots['分发账号乙']
+    $window.SearchBox.Text = '乙'
+    Assert-Distribution ($window.AccountList.Items.Count -eq 1 -and $window.AccountList.Items.Contains('分发账号乙')) 'Packaged search filters names immediately as text changes'
+    Assert-Distribution ($window.AccountList.SelectedItem -ceq '分发账号乙' -and $window.DetailNameLabel.Text -ceq '分发账号乙') 'Packaged filtered preview and detail agree'
+    & $assertPreviewPassive $snapshots['分发账号乙']
+    $window.SearchBox.Text = '不存在'
+    Assert-Distribution ($window.AccountList.Items.Count -eq 0 -and -not $window.SwitchButton.Enabled) 'Packaged empty search cannot switch a hidden selection'
+    & $assertPreviewPassive $snapshots['分发账号乙']
+    $window.SearchBox.Text = ''
+    Assert-Distribution ($window.AccountList.Items.Count -eq 2) 'Clearing packaged search restores both saved names'
+    $window.AccountList.SelectedItem = '分发账号甲'
+    Assert-Distribution ($window.DetailNameLabel.Text -ceq '分发账号甲') 'Packaged detail displays the selected account before an explicit switch'
+    & $assertPreviewPassive $snapshots['分发账号乙']
     Assert-Distribution $window.SwitchButton.Enabled 'Packaged window enables switching after selecting an account'
     $window.SwitchButton.PerformClick()
     Assert-Distribution ($observed.Result.Success -and $observed.Result.Changed -and $observed.Result.Code -eq 'Switched') 'Packaged GUI invokes the real closed-desktop switch workflow'
@@ -111,7 +137,7 @@ try {
     $window.Form.Dispose()
     $window = New-SwitchWindow -Root $fakeRoot -SwitchAction $action
     Assert-Distribution ($window.AccountList.Items.Count -eq 2 -and $window.AccountList.Items.Contains('分发账号甲') -and $window.AccountList.Items.Contains('分发账号乙')) 'Reopened packaged window retains named accounts and hides backups'
-    Write-Output 'PASS: clean ZIP allowlist, extracted GUI save/switch, exact active/backup bytes, repeat guard and reopened list.'
+    Write-Output 'PASS: clean ZIP allowlist, extracted GUI save/preview/search/switch, passive selection, exact active/backup bytes, repeat guard and reopened list.'
     Write-Output 'SCOPE: desktop CLOSED state was injected; no real Codex discovery, exit or restart was exercised.'
 } finally {
     if ($zip) { $zip.Dispose() }

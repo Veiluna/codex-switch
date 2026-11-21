@@ -77,9 +77,19 @@ function Test-SwitchBytesEqual {
 
 function Test-SwitchSnapshot {
     param([string]$Path, [bool]$Exists, [byte[]]$Bytes)
-    if ([IO.File]::Exists($Path) -ne $Exists) { return $false }
+    if ((Test-SwitchFileExists $Path) -ne $Exists) { return $false }
     if (-not $Exists) { return $true }
     return (Test-SwitchBytesEqual ([IO.File]::ReadAllBytes($Path)) $Bytes)
+}
+
+function Test-SwitchFileExists {
+    param([string]$Path)
+    try {
+        $attributes = [IO.File]::GetAttributes($Path)
+        if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) { throw '凭据路径不是普通文件。' }
+        return $true
+    } catch [IO.FileNotFoundException] { return $false }
+      catch [IO.DirectoryNotFoundException] { return $false }
 }
 
 function Invoke-SwitchFileReplace {
@@ -168,7 +178,10 @@ function Invoke-SwitchAccount {
     param(
         [Parameter(Mandatory=$true)][string]$Root,
         [Parameter(Mandatory=$true)][string]$Name,
-        [scriptblock]$BeforeWriteGuard = { Test-SwitchDesktopClosed }
+        [scriptblock]$BeforeWriteGuard = { Test-SwitchDesktopClosed },
+        [switch]$AlreadyLocked,
+        [byte[]]$ExpectedTargetBytes,
+        [Action[byte[]]]$BeforeDeparture
     )
     $lock = $null
     $backup = ''
@@ -188,7 +201,7 @@ function Invoke-SwitchAccount {
         if (-not [IO.Directory]::Exists($accounts)) {
             return (New-SwitchResult $false $false 'TargetMissing' '未找到已保存的目标账号。')
         }
-        try { $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
+        try { if (-not $AlreadyLocked) { $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') } }
         catch { return (New-SwitchResult $false $false 'Busy' '另一个保存或切换操作正在进行，或账号目录不可写，请稍后重试。') }
         $target = $null
         foreach ($leaf in @(($Name + '_auth.json'), ($Name + '.json'))) {
@@ -198,6 +211,7 @@ function Invoke-SwitchAccount {
         }
         if (-not $target) { return (New-SwitchResult $false $false 'TargetMissing' '未找到已保存的目标账号。') }
         $targetBytes = [IO.File]::ReadAllBytes($target)
+        if ($null -ne $ExpectedTargetBytes -and -not (Test-SwitchBytesEqual $targetBytes $ExpectedTargetBytes)) { throw 'ConcurrentChange' }
         try { $null = ConvertFrom-SwitchJson $targetBytes }
         catch { return (New-SwitchResult $false $false 'InvalidTarget' '目标账号存档格式无效，未执行切换。') }
         $guardResult = @(& $BeforeWriteGuard)
@@ -206,9 +220,11 @@ function Invoke-SwitchAccount {
         }
         # The guard can close a process that flushes newer tokens. Snapshot afterwards.
         # Direct typed assignment preserves a zero-length byte[] (pipeline if output does not).
-        $hadAuth = [IO.File]::Exists($auth)
+        $hadAuth = Test-SwitchFileExists $auth
         [byte[]]$oldBytes = $null
         if ($hadAuth) { $oldBytes = [IO.File]::ReadAllBytes($auth) }
+        if ($hadAuth -and $BeforeDeparture) { $BeforeDeparture.Invoke($oldBytes) }
+        if (-not (Test-SwitchSnapshot $target $true $targetBytes)) { throw 'ConcurrentChange' }
         $same = $hadAuth -and (Test-SwitchBytesEqual $oldBytes $targetBytes)
         # Comparing actual bytes makes repeated clicks safe without trusting .current.
         if ($same) {
@@ -227,6 +243,11 @@ function Invoke-SwitchAccount {
             if (Test-SwitchIdentityEqual $activeIdentity (Get-SwitchIdentity $targetBytes)) {
                 $targetBytes = $oldBytes
             }
+        }
+        # 保存和额度网络请求期间桌面端可能重新启动，写入前重新核对。
+        $guardResult = @(& $BeforeWriteGuard)
+        if ($guardResult.Count -ne 1 -or $guardResult[0] -isnot [bool] -or -not $guardResult[0]) {
+            return (New-SwitchResult $false $false 'DesktopRunning' 'Codex 桌面端重新运行或状态无法核实，已停止切换，原登录已保留。')
         }
         # File.Replace captures the actual displaced file, not an earlier read/copy.
         Write-SwitchAtomic -Path $auth -Bytes $targetBytes -BackupPath $backup -CheckExpected -ExpectedExists $hadAuth -ExpectedBytes $oldBytes
