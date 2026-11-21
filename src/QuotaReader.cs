@@ -165,10 +165,10 @@ namespace CodexSwitch
         {
             if(!resetAtUtc.HasValue) return "未知";
             long ticks=(resetAtUtc.Value-now).Ticks;
-            if(ticks<=0) return "00:00";
             // Integer ceiling avoids floating point loss immediately after a minute boundary.
-            long minutes=ticks/TimeSpan.TicksPerMinute+(ticks%TimeSpan.TicksPerMinute==0?0:1);
-            return (minutes/60).ToString("00",CultureInfo.InvariantCulture)+":"+(minutes%60).ToString("00",CultureInfo.InvariantCulture);
+            long minutes=ticks<=0?0:(ticks-1)/TimeSpan.TicksPerMinute+1;
+            return String.Format(CultureInfo.InvariantCulture,"{0:00}天{1:00}小时{2:00}分钟",
+                minutes/(24*60),minutes/60%24,minutes%60);
         }
         public static string FormatWindowSummary(QuotaWindow window,DateTimeOffset now)
         {

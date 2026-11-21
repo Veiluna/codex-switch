@@ -26,10 +26,11 @@ internal static class QuotaPresentationTests
         QuotaWindow[] windows=QuotaReader.Windows(usage);
         Check(windows.Length==4 && windows[0].LimitWindowSeconds==604800 && windows[0].UsedPercent==100 && windows[1].LimitWindowSeconds==18000 && windows[1].UsedPercent==25,"real durations put weekly before five-hour without swapping values");
         Check(windows[2].Label.Contains("额外") && windows[2].LimitWindowSeconds==604800 && windows[3].UsedPercent==0,"additional quotas keep their own sorted group and real zero");
-        Check(QuotaReader.FormatCountdown(now.AddHours(25).AddMinutes(1),now)=="25:01","countdown keeps total hours beyond one day");
-        Check(QuotaReader.FormatCountdown(now.AddSeconds(1),now)=="00:01" && QuotaReader.FormatCountdown(now.AddMinutes(1).AddTicks(1),now)=="00:02","partial minutes round up");
-        Check(QuotaReader.FormatCountdown(now,now)=="00:00" && QuotaReader.FormatCountdown(now.AddSeconds(-1),now)=="00:00" && QuotaReader.FormatCountdown(null,now)=="未知","due and absent reset stay distinct");
-        Check(QuotaReader.FormatCountdown(now.ToOffset(TimeSpan.FromHours(8)).AddMinutes(1),now)=="00:01","offsets compare the same instant");
+        Check(QuotaReader.FormatCountdown(now.AddHours(25).AddMinutes(1),now)=="01天01小时01分钟","countdown breaks total minutes into days, hours and minutes");
+        Check(QuotaReader.FormatCountdown(now.AddDays(1).AddSeconds(-1),now)=="01天00小时00分钟","rounding carries into the next day");
+        Check(QuotaReader.FormatCountdown(now.AddSeconds(1),now)=="00天00小时01分钟" && QuotaReader.FormatCountdown(now.AddMinutes(1).AddTicks(1),now)=="00天00小时02分钟","partial minutes round up");
+        Check(QuotaReader.FormatCountdown(now,now)=="00天00小时00分钟" && QuotaReader.FormatCountdown(now.AddSeconds(-1),now)=="00天00小时00分钟" && QuotaReader.FormatCountdown(null,now)=="未知","due and absent reset stay distinct");
+        Check(QuotaReader.FormatCountdown(now.ToOffset(TimeSpan.FromHours(8)).AddMinutes(1),now)=="00天00小时01分钟","offsets compare the same instant");
         var unknown=QuotaReader.Windows("{\"rate_limit\":{\"primary_window\":{\"used_percent\":0},\"secondary_window\":{\"reset_at\":null}}}");
         Check(unknown.Length==2 && !unknown[0].LimitWindowSeconds.HasValue && !unknown[1].UsedPercent.HasValue && !unknown[0].Label.Contains("周") && !unknown[0].Label.Contains("5 小时"),"missing duration and used values remain unknown");
         var single=QuotaReader.Windows("{\"rate_limit\":{\"secondary_window\":"+Window(604800,0,reset)+"}}");
@@ -37,7 +38,7 @@ internal static class QuotaPresentationTests
         var arbitrary=QuotaReader.Windows("{\"rate_limit\":{\"primary_window\":"+Window(3600,50,reset)+"}}");
         Check(arbitrary[0].Label=="60 分钟额度" && arbitrary[0].LimitWindowSeconds==3600,"nonstandard durations are preserved rather than relabeled as week or five-hour");
         string text=QuotaReader.Format(usage,null,null,now);
-        Check(text.IndexOf("周额度",StringComparison.Ordinal)<text.IndexOf("5 小时额度",StringComparison.Ordinal) && text.Contains("25:01") && text.Contains("剩余 0%"),"full details use the same period order and dynamic countdown");
+        Check(text.IndexOf("周额度",StringComparison.Ordinal)<text.IndexOf("5 小时额度",StringComparison.Ordinal) && text.Contains("01天01小时01分钟") && text.Contains("剩余 0%"),"full details use the same period order and dynamic countdown");
         string root=Path.Combine(Environment.CurrentDirectory,"tests",".tmp-quota-presentation-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(root,"accounts"));
         try
@@ -48,11 +49,11 @@ internal static class QuotaPresentationTests
                 service.Now=delegate {return now;}; service.FetchQuota=delegate {return usage;};
                 CatalogEntry entry=service.List()[0];
                 bool captured=(bool)typeof(AccountService).GetMethod("Capture",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(service,new object[]{entry});
-                Check(captured && service.List()[0].QuotaText.Contains("25:01"),"captured snapshot renders a current countdown");
+                Check(captured && service.List()[0].QuotaText.Contains("01天01小时01分钟"),"captured snapshot renders a current countdown");
                 now=now.AddMinutes(2);
                 entry=service.List()[0];
-                Check(entry.QuotaText.Contains("24:59") && !entry.QuotaText.Contains("25:01") && entry.Windows[0].UsedPercent==100,"loading snapshot recalculates countdown without changing observed usage");
-                Check(AccountService.FormatQuotaDetails(entry,now.AddMinutes(2)).Contains("24:57"),"open details recalculate countdown without rereading the catalog");
+                Check(entry.QuotaText.Contains("01天00小时59分钟") && !entry.QuotaText.Contains("01天01小时01分钟") && entry.Windows[0].UsedPercent==100,"loading snapshot recalculates countdown without changing observed usage");
+                Check(AccountService.FormatQuotaDetails(entry,now.AddMinutes(2)).Contains("01天00小时57分钟"),"open details recalculate countdown without rereading the catalog");
                 Check(entry.QuotaSummary=="Credits 余额：未知","shared summary preserves independent unknown credits");
                 string capturedJson=File.ReadAllText(Directory.GetFiles(Path.Combine(root,"accounts"),".quota-*.snapshot")[0]);
                 Check(capturedJson.Contains("limit_window_seconds") && capturedJson.Contains("quota_data") && !capturedJson.Contains("access_token"),"new snapshot stores exact periods and display-only data");
@@ -64,7 +65,7 @@ internal static class QuotaPresentationTests
                 File.WriteAllText(path,serializer.Serialize(legacy),Encoding.UTF8);
                 entry=service.List()[0];
                 Check(entry.Windows[0].LimitWindowSeconds==604800 && entry.Windows[0].Exhausted && entry.Windows[0].ResetAtUtc==now.AddMinutes(2) && entry.Windows[1].LimitWindowSeconds==18000 && entry.Windows[1].ResetAtUtc==now.AddMinutes(1),"legacy text duration matches original role and preserves the correct reset");
-                Check(entry.QuotaText.IndexOf("周额度",StringComparison.Ordinal)<entry.QuotaText.IndexOf("5 小时额度",StringComparison.Ordinal) && entry.QuotaText.Contains("00:02"),"legacy details rebuild the same sorted live presentation");
+                Check(entry.QuotaText.IndexOf("周额度",StringComparison.Ordinal)<entry.QuotaText.IndexOf("5 小时额度",StringComparison.Ordinal) && entry.QuotaText.Contains("00天00小时02分钟"),"legacy details rebuild the same sorted live presentation");
                 legacy["quota_text"]="旧额度数据，无时长";
                 File.WriteAllText(path,serializer.Serialize(legacy),Encoding.UTF8);
                 entry=service.List()[0];
@@ -81,10 +82,10 @@ internal static class QuotaPresentationTests
                 legacy["quota_text"]="周额度：剩余 0% · 重置倒计时 999:99\n窗口时长：10080 分钟；已用 100%\n重置：未知\nCredits 余额：未知";
                 File.WriteAllText(path,serializer.Serialize(legacy),Encoding.UTF8);
                 entry=service.List()[0];
-                Check(entry.QuotaText.Contains("00:02") && !entry.QuotaText.Contains("999:99"),"duration-only snapshots also replace persisted countdowns with current values");
+                Check(entry.QuotaText.Contains("00天00小时02分钟") && !entry.QuotaText.Contains("999:99"),"duration-only snapshots also replace persisted countdowns with current values");
                 now=now.AddHours(2);
                 entry=service.List()[0];
-                Check(entry.HasDueExhausted && entry.QuotaText.Contains("00:00") && entry.ResetHint.Contains("尚未重新查询"),"due exhausted history retains warnings and zero countdown");
+                Check(entry.HasDueExhausted && entry.QuotaText.Contains("00天00小时00分钟") && entry.ResetHint.Contains("尚未重新查询"),"due exhausted history retains warnings and zero countdown");
             }
         }
         finally { Directory.Delete(root,true); }

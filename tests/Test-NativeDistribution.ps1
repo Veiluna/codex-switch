@@ -38,7 +38,23 @@ foreach ($name in @('UiStyle.ps1','Desktop.ps1','AccountList.ps1','AccountSwitch
 }
 Assert-True ($assembly.GetName().Name -eq 'CodexSwitch.Core') 'Incorrect core assembly name.'
 Assert-True ($assembly.GetName().ProcessorArchitecture.ToString() -eq 'Amd64') 'Application is not x64.'
-$setup = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $DistPath 'installer.exe')))
+$setupFile = Join-Path $DistPath ('CodexSwitch-Setup-' + $metadata.Version + '-x64.exe')
+Add-Type -AssemblyName System.Drawing
+foreach ($program in @($exe, $cli, $setupFile)) {
+    $actual = [Drawing.Icon]::ExtractAssociatedIcon([IO.Path]::GetFullPath($program))
+    Assert-True ($null -ne $actual) ('Missing application icon: ' + $program)
+    $expected = New-Object Drawing.Icon((Join-Path $root 'assets\CodexSwitch.ico'), $actual.Size)
+    $left = $actual.ToBitmap()
+    $right = $expected.ToBitmap()
+    try {
+        for ($y = 0; $y -lt $left.Height; $y++) {
+            for ($x = 0; $x -lt $left.Width; $x++) {
+                Assert-True ($left.GetPixel($x,$y).ToArgb() -eq $right.GetPixel($x,$y).ToArgb()) ('Wrong application icon: ' + $program)
+            }
+        }
+    } finally { $left.Dispose(); $right.Dispose(); $actual.Dispose(); $expected.Dispose() }
+}
+$setup = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($setupFile))
 Assert-True ($setup.EntryPoint.DeclaringType.FullName -eq 'CodexSwitch.Setup.SetupProgram') 'Unexpected installer entry point.'
 $resources = @($setup.GetManifestResourceNames())
 Assert-True ($resources.Count -eq 3) 'Unexpected installer payload count.'

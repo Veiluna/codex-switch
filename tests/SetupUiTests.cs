@@ -7,12 +7,17 @@ using System.Windows.Forms;
 // The production InstallService is deliberately excluded from this executable.
 namespace CodexSwitch.Setup
 {
+    [Flags] internal enum InstallComponents { Desktop = 1, Cli = 2, All = 3 }
     internal sealed class InstallService
     {
         internal string DirectoryPath { get; set; }
         internal int Installs, Uninstalls;
         internal Exception Failure;
         internal ManualResetEvent Release;
+        internal InstallComponents DefaultComponents = InstallComponents.All;
+        internal InstallComponents Selected;
+        internal InstallComponents GetDefaultComponents() { return DefaultComponents; }
+        internal void Install(InstallComponents components) { Selected = components; Install(); }
         internal void Install() { Interlocked.Increment(ref Installs); Work(); }
         internal void Uninstall() { Interlocked.Increment(ref Uninstalls); Work(); }
         private void Work() { if (Release != null) Release.WaitOne(8000); if (Failure != null) throw Failure; }
@@ -71,6 +76,18 @@ namespace CodexSwitch.Setup
                 {
                     form.Show(); Application.DoEvents();
                     Check(Find<TextBox>(form,"InstallDirectory").ReadOnly && Find<TextBox>(form,"InstallDirectory").Text == cancel.DirectoryPath, "实际目录必须可复制且只读");
+                    var desktop = Find<CheckBox>(form,"DesktopComponent");
+                    var cli = Find<CheckBox>(form,"CliComponent");
+                    Check(desktop.Checked && cli.Checked && desktop.TabStop && cli.TabStop, "首次组件必须全选且键盘可达");
+                    desktop.Checked = false; cli.Checked = false;
+                    Check(!Find<Button>(form,"ActionButton").Enabled && Find<RichTextBox>(form,"Details").Text.Contains("至少选择"), "空选未阻止提交并解释原因");
+                    cli.Checked = true;
+                    Check(Find<Button>(form,"ActionButton").Enabled, "选择组件后未恢复提交");
+                    desktop.Checked = true;
+                    desktop.Focus(); form.SelectNextControl(desktop,true,true,true,true);
+                    Check(form.ActiveControl == cli, "桌面组件后 Tab 未到 CLI");
+                    form.SelectNextControl(cli,true,true,true,true);
+                    Check(form.ActiveControl == Find<TextBox>(form,"InstallDirectory"), "CLI 组件后 Tab 未到路径");
                     var path = Find<TextBox>(form,"InstallDirectory");
                     path.SelectAll(); Check(path.SelectedText == cancel.DirectoryPath && path.ShortcutsEnabled,"目录不可完整选择复制");
                     path.Focus(); form.SelectNextControl(path,true,true,true,true);
@@ -87,9 +104,18 @@ namespace CodexSwitch.Setup
                 using (var form = new SetupForm(uninstall,true))
                 {
                     form.Show(); Application.DoEvents();
+                    Check(form.Controls.Find("DesktopComponent",true).Length == 0 && form.Controls.Find("CliComponent",true).Length == 0, "卸载不得显示组件选择");
                     Check(form.ActiveControl == Find<Button>(form,"CancelButton"), "卸载初始焦点必须取消");
                     Capture(form,"uninstall-ready"); Key(form,Keys.Enter);
                     Check(!form.Visible && uninstall.Uninstalls == 0, "卸载默认 Enter 不得执行");
+                }
+                var existing = Service(); existing.DefaultComponents = InstallComponents.Cli;
+                using (var form = new SetupForm(existing,false)) {
+                    form.Show(); Application.DoEvents();
+                    Check(!Find<CheckBox>(form,"DesktopComponent").Checked && Find<CheckBox>(form,"CliComponent").Checked, "GUI 未保持已有组件");
+                    Find<Button>(form,"ActionButton").PerformClick(); Pump(delegate { return form.OperationFinished; });
+                    Check(existing.Selected == InstallComponents.Cli && !Find<Label>(form,"Introduction").Text.Contains("开始菜单"), "CLI 单选结果文案不准确");
+                    form.Close();
                 }
                 var busy = Service(); busy.Release = new ManualResetEvent(false);
                 using (var form = new SetupForm(busy,false))

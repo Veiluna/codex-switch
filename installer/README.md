@@ -1,8 +1,8 @@
 # Windows 构建和安装
 
-在 Windows x64 上运行 `build.cmd`，默认生成 0.4.3 的两个便携 EXE、自研 `installer.exe`、npm tarball 和 `SHA256SUMS.txt`。Windows 原生程序使用系统 .NET Framework 4.8 C# 编译器和 Windows PowerShell 5.1。构建 npm 格式的附件时使用 npm；仅构建原生发行物可加 `-SkipNpm`。用户下载后双击安装或使用静默安装均可离线完成。
+在 Windows x64 上运行 `build.cmd`。发布附件为 `dist/CodexSwitch-Setup-0.4.4-x64.exe`。桌面和命令行二进制、构建记录与校验清单留在本地供验收使用。Windows 原生程序使用系统 .NET Framework 4.8 C# 编译器和 Windows PowerShell 5.1。需要测试本地 npm 包时可加 `-IncludeNpm`。用户双击安装或使用静默安装均可离线完成。
 
-安装器编译时将最终桌面端、CLI 和卸载入口嵌入自身。两个应用继续使用相同的本地账号核心。构建记录位于 `dist/build-info.json`。安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\CodexSwitch`，管理开始菜单入口、用户 PATH 和 Windows 应用列表的卸载项。旧 MSI 的测试构建器保存在 `tests/legacy-msi`，仅用于历史兼容验证。
+安装器内嵌桌面端、CLI 和卸载入口。两种组件使用同一份本地账号核心，可以分别安装。桌面组件管理开始菜单快捷方式，CLI 组件管理用户 PATH。卸载登记和安装位置按当前用户管理，默认目录为 `%LOCALAPPDATA%\Programs\CodexSwitch`。构建记录位于 `dist/build-info.json`。
 
 从 Windows「已安装的应用」卸载时，卸载程序自身仍在运行。修复后的安装器会在卸载事务内为这个文件改名，并保留在 `%LOCALAPPDATA%\CodexSwitch\Setup` 中。程序、快捷方式、PATH 和卸载登记均在返回成功前处理完毕。需要释放这部分空间时，等卸载窗口退出后，可手动删除该目录中对应的 `uninstall.exe.cs-backup-<GUID>` 文件。
 
@@ -18,3 +18,5 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Installer.p
 ```
 
 分发测试核对两个便携程序的共享核心、安装器的三个资源和最终附件摘要。入口测试启动正式安装器，检查帮助、无效参数与图形取消。生命周期测试将安装器服务的文件和注册表目标切换到隔离夹具，保留正式程序资源与快捷方式创建逻辑。
+
+验收后将源码推送到 main，运行 `installer/Publish-Release.ps1 -ReleaseNotesFile <正文文件>`。发布脚本按构建版本构造安装器文件名，校验草稿中的单一附件与本地字节一致，再将其设为最新正式版。

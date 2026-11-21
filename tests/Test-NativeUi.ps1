@@ -8,6 +8,7 @@ try {
     $exe = Join-Path $temporary 'NativeUiTests.exe'
     $arguments = @('/nologo', '/codepage:65001', '/target:exe', '/main:CodexSwitch.NativeUiTests', ('/out:' + $exe), ('/win32manifest:' + (Join-Path $project 'installer\app.manifest')),
         '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll', ('/r:' + $automation))
+    $arguments += '/win32icon:' + (Join-Path $project 'assets\CodexSwitch.ico')
     foreach ($file in @('UiStyle.ps1', 'Desktop.ps1', 'AccountList.ps1', 'AccountSwitch.ps1', 'SaveAccount.ps1')) {
         $arguments += '/resource:' + (Join-Path $project $file) + ',CodexSwitch.' + $file
     }

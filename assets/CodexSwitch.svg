@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 24 24">
+  <title>Codex Switch</title>
+  <rect x="1" y="1" width="22" height="22" rx="5" fill="#153d5c"/>
+  <g fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline stroke="#f5f9fc" points="6,8 18,8 14.5,4.5"/>
+    <polyline stroke="#f5f9fc" points="18,8 14.5,11.5"/>
+    <polyline stroke="#73dfd4" points="18,16 6,16 9.5,12.5"/>
+    <polyline stroke="#73dfd4" points="6,16 9.5,19.5"/>
+  </g>
+</svg>

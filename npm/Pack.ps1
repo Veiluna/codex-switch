@@ -26,7 +26,10 @@ function Assert-NativePayload([string]$Path) {
 }
 
 $payloads = @('codex-switch.exe', 'installer.exe')
-foreach ($name in $payloads) { Assert-NativePayload (Join-Path $dist $name) }
+$installer = Join-Path $dist ('CodexSwitch-Setup-' + $Version + '-x64.exe')
+if (-not [IO.File]::Exists($installer)) { $installer = Join-Path $dist 'installer.exe' }
+$sources = @{ 'codex-switch.exe' = (Join-Path $dist 'codex-switch.exe'); 'installer.exe' = $installer }
+foreach ($name in $payloads) { Assert-NativePayload $sources[$name] }
 [void][IO.Directory]::CreateDirectory($output)
 $stage = Join-Path $output ('.npm-stage-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($stage)
@@ -43,7 +46,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $target
     }
     [void][IO.Directory]::CreateDirectory((Join-Path $stage 'native'))
-    foreach ($name in $payloads) { Copy-Item -LiteralPath (Join-Path $dist $name) -Destination (Join-Path $stage ('native/' + $name)) }
+    foreach ($name in $payloads) { Copy-Item -LiteralPath $sources[$name] -Destination (Join-Path $stage ('native/' + $name)) }
     Assert-ReleasePayload -Path @($payloads | ForEach-Object { Join-Path $stage ('native/' + $_) })
     Push-Location -LiteralPath $stage
     try {

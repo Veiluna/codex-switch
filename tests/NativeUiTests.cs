@@ -74,6 +74,55 @@ namespace CodexSwitch
         }
         private static CatalogEntry Entry(string name, bool current, bool saved)
                 { return new CatalogEntry { Name = name, IsCurrent = current, IsSaved = saved, SnapshotId = "snapshot-"+name, AccountId = "fixture-"+name, QuotaText = "5小时窗口：上次剩余 0%", Windows = new QuotaWindow[0] }; }
+        private static void RunTrayTests()
+        {
+            var fake=new FakeService { Entries=new[]{Entry("tray-current",true,true),Entry("tray-target",false,true)} };
+            using(var form=new MainForm(fake))
+            {
+                form.Show(); Application.DoEvents();
+                var tray=form.TrayIcon; var menu=tray.ContextMenuStrip; IntPtr handle=form.Handle;
+                Check(form.ShowIcon && form.Icon!=null && tray.Icon==form.Icon,"主窗口和托盘必须使用程序图标");
+                Check(!tray.Visible && tray.Text=="Codex Switch","正常窗口不应常驻托盘或泄露账号信息");
+                Check(menu.Items.Count==2 && menu.Items[0].Text=="打开 Codex Switch" && menu.Items[1].Text=="退出","托盘菜单缺少打开或退出");
+                form.SearchBox.Text="tray"; form.SelectEntry("tray-target"); var selected=form.SelectedEntry;
+                int reads=fake.ListCount;
+                for(int cycle=0;cycle<2;cycle++)
+                {
+                    form.WindowState=FormWindowState.Minimized; Application.DoEvents();
+                    Check(!form.Visible && tray.Visible,"最小化未隐藏窗口并显示托盘图标");
+                    if(cycle==0) menu.Items[0].PerformClick();
+                    else typeof(NotifyIcon).GetMethod("OnDoubleClick",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(tray,new object[]{EventArgs.Empty});
+                    Application.DoEvents();
+                    Check(form.Visible && form.WindowState==FormWindowState.Normal && !tray.Visible,"托盘打开或双击未恢复普通窗口：cycle="+cycle+", visible="+form.Visible+", state="+form.WindowState+", tray="+tray.Visible);
+                    Check(form.Handle==handle && Object.ReferenceEquals(tray,form.TrayIcon) && Object.ReferenceEquals(selected,form.SelectedEntry) && form.SearchBox.Text=="tray" && fake.ListCount==reads,"托盘往返重建窗口、重复图标或丢失浏览状态");
+                }
+                form.WindowState=FormWindowState.Maximized; Application.DoEvents();
+                form.WindowState=FormWindowState.Minimized; Application.DoEvents(); menu.Items[0].PerformClick(); Application.DoEvents();
+                Check(form.Visible && form.WindowState==FormWindowState.Maximized && !tray.Visible,"托盘未恢复最大化状态");
+                fake.DelaySwitch=true;
+                form.InvokeSelectedAccount(); PumpUntil(delegate { return fake.SwitchCount==1; });
+                form.WindowState=FormWindowState.Minimized; Application.DoEvents(); menu.Items[1].PerformClick(); Application.DoEvents();
+                Check(!form.IsDisposed && form.OperationBusy && form.Visible && !tray.Visible && form.StatusText.Contains("操作进行中"),"忙碌时托盘退出必须保留操作并显示等待说明");
+                fake.Release.Set(); PumpUntil(delegate { return !form.OperationBusy; });
+                fake.Release.Reset(); fake.ConfirmPhases=new[]{"Force"}; bool forceVisible=false;
+                form.ConfirmSwitch=delegate {
+                    forceVisible=form.Visible && !tray.Visible && form.WindowState==FormWindowState.Maximized;
+                    return false;
+                };
+                form.InvokeSelectedAccount(); PumpUntil(delegate { return fake.SwitchCount==2; });
+                form.WindowState=FormWindowState.Minimized; Application.DoEvents(); fake.Release.Set();
+                PumpUntil(delegate { return !form.OperationBusy; });
+                Check(forceVisible && !fake.LastApproved,"隐藏期间强制结束确认必须恢复原窗口并保留取消权限");
+                form.WindowState=FormWindowState.Minimized; Application.DoEvents(); menu.Items[1].PerformClick(); Application.DoEvents();
+                Check(form.IsDisposed && !tray.Visible && menu.IsDisposed,"托盘退出未关闭窗口并释放通知图标和菜单");
+            }
+            using(var form=new MainForm(new FakeService { Entries=new[]{Entry("close-current",true,true)} }))
+            {
+                form.Show(); Application.DoEvents(); var tray=form.TrayIcon; var menu=tray.ContextMenuStrip;
+                form.Close(); Application.DoEvents();
+                Check(form.IsDisposed && !tray.Visible && menu.IsDisposed,"窗口 X 应正常退出并释放托盘资源");
+            }
+        }
         [STAThread]
         private static int Main()
         {
@@ -81,6 +130,7 @@ namespace CodexSwitch
             {
                 Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
                 Control.CheckForIllegalCrossThreadCalls = true;
+                RunTrayTests();
                 string longName = new string('长', 96);
                 var current = Entry("alpha", true, true);
                 var beta = Entry("beta", false, true);
@@ -93,15 +143,15 @@ namespace CodexSwitch
                 using(var minuteForm=new MainForm(new FakeService { Entries=new[]{timed} }))
                 {
                     minuteForm.Show(); Application.DoEvents(); minuteForm.UpdateReminders(quotaNow);
-                    Check(minuteForm.QuotaText.Text.IndexOf("周额度",StringComparison.Ordinal)<minuteForm.QuotaText.Text.IndexOf("5 小时额度",StringComparison.Ordinal) && minuteForm.QuotaText.Text.Contains("26:30"),"桌面必须周优先、5小时第二且倒计时显示总小时:分钟");
+                    Check(minuteForm.QuotaText.Text.IndexOf("周额度",StringComparison.Ordinal)<minuteForm.QuotaText.Text.IndexOf("5 小时额度",StringComparison.Ordinal) && minuteForm.QuotaText.Text.Contains("01天02小时30分钟"),"桌面必须周优先、5小时第二且倒计时显示天小时分钟");
                     minuteForm.QuotaText.Focus(); minuteForm.QuotaText.Select(0,4); string selection=minuteForm.QuotaText.SelectedText;
                     int minuteChanges=0; minuteForm.QuotaText.TextChanged+=delegate { minuteChanges++; };
                     minuteForm.UpdateReminders(quotaNow.AddSeconds(20));
                     Check(minuteChanges==0,"分钟显示未变化时不得重写额度摘要");
                     minuteForm.UpdateReminders(quotaNow.AddMinutes(1));
-                    Check(minuteChanges==1 && minuteForm.QuotaText.Text.Contains("26:29") && minuteForm.QuotaText.SelectedText==selection && minuteForm.QuotaText.Focused,"分钟倒计时未局部更新或破坏正文复制选区与焦点");
+                    Check(minuteChanges==1 && minuteForm.QuotaText.Text.Contains("01天02小时29分钟") && minuteForm.QuotaText.SelectedText==selection && minuteForm.QuotaText.Focused,"分钟倒计时未局部更新或破坏正文复制选区与焦点");
                     minuteForm.UpdateReminders(quotaNow.AddHours(200));
-                    Check(minuteForm.QuotaText.Text.Contains("00:00") && minuteForm.QuotaText.Text.Contains("已到点"),"倒计时到点必须展示00:00和时间提醒");
+                    Check(minuteForm.QuotaText.Text.Contains("00天00小时00分钟") && minuteForm.QuotaText.Text.Contains("已到点"),"倒计时到点必须展示00天00小时00分钟和时间提醒");
                     minuteForm.Close(); Application.DoEvents();
                 }
                 var workspaceTarget=Entry("目标工作区",false,true); workspaceTarget.UserId="fixture-user"; workspaceTarget.AccountId="workspace-target";

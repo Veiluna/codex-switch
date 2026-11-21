@@ -227,6 +227,11 @@ namespace CodexSwitch
         private readonly Label countLabel, statusLabel, currentLabel;
         private readonly ToolTip toolTip=new ToolTip();
         private readonly System.Windows.Forms.Timer reminderTimer=new System.Windows.Forms.Timer();
+        private readonly Icon applicationIcon;
+        private readonly ContextMenuStrip trayMenu;
+        internal readonly NotifyIcon TrayIcon;
+        private FormWindowState restoreWindowState=FormWindowState.Normal;
+        private bool restoringFromTray, resourcesDisposed;
         private CatalogEntry[] entries=new CatalogEntry[0];
         private bool loading, busy, closing, readFailed, currentReadFailed;
         private string pendingWorkspaceUser,pendingWorkspaceAccount;
@@ -253,7 +258,9 @@ namespace CodexSwitch
         internal MainForm(IDesktopAccounts service)
         {
             this.service=service;
-            Name="CodexSwitchWindow"; Text="Codex 账号切换"; ShowIcon=false; StartPosition=FormStartPosition.CenterScreen;
+            Name="CodexSwitchWindow"; Text="Codex 账号切换"; ShowIcon=true; StartPosition=FormStartPosition.CenterScreen;
+            applicationIcon=Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            Icon=applicationIcon;
             ClientSize=new Size(980,660); MinimumSize=new Size(940,650); Font=new Font("Microsoft YaHei UI",10);
             ForeColor=NativeStyle.Ink; BackColor=NativeStyle.Surface; AutoScaleMode=AutoScaleMode.Font;
             var layout=new TableLayoutPanel { Dock=DockStyle.Fill, ColumnCount=2, RowCount=1, Margin=Padding.Empty };
@@ -317,8 +324,40 @@ namespace CodexSwitch
             reminderTimer.Interval=1000; reminderTimer.Tick+=delegate { UpdateReminders(DateTimeOffset.UtcNow); }; reminderTimer.Start();
             Activated+=delegate { UpdateReminders(DateTimeOffset.UtcNow); RefreshPendingWorkspace(); };
             Shown+=delegate { AccountList.Focus(); };
-            FormClosing+=delegate(object sender,FormClosingEventArgs e) { if(busy) { e.Cancel=true; SetStatus("操作进行中，请等待结果后关闭窗口。"); } else closing=true; };
+            trayMenu=new ContextMenuStrip();
+            trayMenu.Items.Add("打开 Codex Switch",null,delegate { RestoreFromTray(); });
+            trayMenu.Items.Add("退出",null,delegate { Close(); });
+            TrayIcon=new NotifyIcon { Icon=applicationIcon, Text="Codex Switch", ContextMenuStrip=trayMenu, Visible=false };
+            TrayIcon.DoubleClick+=delegate { RestoreFromTray(); };
+            FormClosing+=delegate(object sender,FormClosingEventArgs e) {
+                if(busy) { e.Cancel=true; RestoreFromTray(); SetStatus("操作进行中，请等待结果后关闭窗口。"); }
+                else closing=true;
+            };
             RefreshAccounts(null);
+        }
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if(TrayIcon==null || closing || restoringFromTray) return;
+            if(WindowState==FormWindowState.Minimized)
+            {
+                TrayIcon.Visible=true;
+                Hide();
+            }
+            else restoreWindowState=WindowState;
+        }
+        private void RestoreFromTray()
+        {
+            if(closing || IsDisposed) return;
+            restoringFromTray=true;
+            try
+            {
+                TrayIcon.Visible=false;
+                Show();
+                if(WindowState==FormWindowState.Minimized) WindowState=restoreWindowState;
+                Activate();
+            }
+            finally { restoringFromTray=false; }
         }
         private void DrawAccount(object sender,DrawItemEventArgs e)
         {
@@ -481,7 +520,7 @@ namespace CodexSwitch
                         if(phase=="Close") return true;
                         if(phase!="Force" || forcePrompted) return false;
                         forcePrompted=true;
-                        return (bool)Invoke(new Func<bool>(delegate { return ConfirmSwitch("Force",account); }));
+                        return (bool)Invoke(new Func<bool>(delegate { RestoreFromTray(); return ConfirmSwitch("Force",account); }));
                     });
                 }
                 catch { result=new OperationResult(false,"Unavailable","切换未完成，请检查本机账号目录和桌面端状态后重试。"); }
@@ -530,7 +569,13 @@ namespace CodexSwitch
         }
         protected override void Dispose(bool disposing)
         {
-            if(disposing) { closing=true; reminderTimer.Stop(); reminderTimer.Dispose(); toolTip.Dispose(); service.Dispose(); }
+            if(disposing && !resourcesDisposed)
+            {
+                resourcesDisposed=true; closing=true;
+                reminderTimer.Stop(); reminderTimer.Dispose(); toolTip.Dispose();
+                TrayIcon.Visible=false; TrayIcon.Dispose(); trayMenu.Dispose(); applicationIcon.Dispose();
+                service.Dispose();
+            }
             base.Dispose(disposing);
         }
     }

@@ -1,4 +1,4 @@
-param([ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$Version = '0.4.3', [switch]$SkipInstaller, [switch]$SkipNpm)
+param([ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$Version = '0.4.4', [switch]$SkipInstaller, [switch]$SkipNpm, [switch]$IncludeNpm)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 $root = $PSScriptRoot
@@ -35,6 +35,7 @@ try {
     [IO.File]::WriteAllLines($versionSource, $assemblyInfo, [Text.Encoding]::UTF8)
     $exe = Join-Path $work 'CodexSwitch.exe'
     $cli = Join-Path $work 'codex-switch.exe'
+    $icon = Join-Path $root 'assets\CodexSwitch.ico'
     $core = Join-Path $work 'CodexSwitch.Core.dll'
     $common = @('/nologo','/platform:x64','/langversion:5','/codepage:65001','/optimize+','/debug-','/warn:4')
     foreach ($reference in @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Web.Extensions.dll',$sma)) { $common += '/reference:' + $reference }
@@ -50,7 +51,7 @@ try {
     $coreSources = @($sources | Where-Object { $_ -notin ($guiSources + $cliSources + $hostSources) })
     & $compiler @coreArgs $friends $versionSource $coreSources.FullName
     if ($LASTEXITCODE -ne 0) { throw 'Shared core compilation failed.' }
-    $hostArgs = $common + @('/main:CodexSwitch.Bootstrap', ('/reference:' + $core), ('/resource:' + $core + ',CodexSwitch.Core.dll'))
+    $hostArgs = $common + @('/main:CodexSwitch.Bootstrap', ('/win32icon:' + $icon), ('/reference:' + $core), ('/resource:' + $core + ',CodexSwitch.Core.dll'))
     & $compiler @hostArgs '/target:winexe' ('/out:' + $exe) ('/win32manifest:' + (Join-Path $root 'installer\app.manifest')) $versionSource $hostSources.FullName $guiSources.FullName
     if ($LASTEXITCODE -ne 0) { throw 'Desktop compilation failed.' }
     & $compiler @hostArgs '/target:exe' '/define:CLI' ('/out:' + $cli) $versionSource $hostSources.FullName $cliSources.FullName
@@ -61,12 +62,12 @@ try {
     if (-not $SkipInstaller) {
         $setupSources = @(Get-ChildItem -LiteralPath (Join-Path $root 'installer\native') -Filter '*.cs' -File | Sort-Object Name)
         $sharedSetup = @($setupSources | Where-Object { $_.Name -notin @('SetupProgram.cs','UninstallHost.cs') } | ForEach-Object { $_.FullName })
-        $setupArgs = @('/target:winexe', '/reference:Microsoft.CSharp.dll', ('/win32manifest:' + (Join-Path $root 'installer\app.manifest'))) + $common
+        $setupArgs = @('/target:winexe', '/reference:Microsoft.CSharp.dll', ('/win32icon:' + $icon), ('/win32manifest:' + (Join-Path $root 'installer\app.manifest'))) + $common
         $uninstaller = Join-Path $work 'uninstall.exe'
         & $compiler @setupArgs '/main:CodexSwitch.Setup.UninstallHost' ('/out:' + $uninstaller) $versionSource $sharedSetup (Join-Path $root 'installer\native\UninstallHost.cs')
         if ($LASTEXITCODE -ne 0) { throw 'Uninstaller compilation failed.' }
         Assert-ReleasePayload -Path $uninstaller
-        $installer = Join-Path $work 'installer.exe'
+        $installer = Join-Path $work ('CodexSwitch-Setup-' + $Version + '-x64.exe')
         $payloadArgs = @('/resource:' + $exe + ',Payload.CodexSwitch.exe'
                          '/resource:' + $cli + ',Payload.codex-switch.exe'
                          '/resource:' + $uninstaller + ',Payload.uninstall.exe')
@@ -75,12 +76,13 @@ try {
         Assert-ReleasePayload -Path $installer
         $artifacts += $installer
         $inputFiles += $setupSources.FullName
-        if (-not $SkipNpm) {
+        if ($IncludeNpm -and -not $SkipNpm) {
             & (Join-Path $root 'npm\Pack.ps1') -Version $Version -DistPath $work -OutputDirectory $work
             $artifacts += Join-Path $work ('veiluna-codex-switch-' + $Version + '.tgz')
             $inputFiles += @(Get-ChildItem -Recurse -File -LiteralPath (Join-Path $root 'npm') | ForEach-Object { $_.FullName })
         }
     }
+    $inputFiles += $icon
     $report = [ordered]@{
         Version = $Version; Target = 'Windows x64; .NET Framework 4.x; Windows PowerShell 5.1'; Compiler = $compiler;
         CompilerVersion = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Text;
 using System.Diagnostics;
@@ -353,6 +353,94 @@ internal static class InstallerServiceTests
             using (RegistryKey k = Registry.CurrentUser.OpenSubKey(c.UninstallKey)) Check(k == null, "提交后的卸载 ARP 不一致");
         } finally { CleanRegistry(c); }
     }
+    private static void Arguments()
+    {
+        bool uninstall, quiet, help; InstallComponents? components;
+        Check(SetupProgram.TryParseArguments(new string[0], out uninstall, out quiet, out help, out components) && !uninstall && !quiet && components == null, "默认 GUI 参数错误");
+        Check(SetupProgram.TryParseArguments(new string[] { "install", "--quiet", "--components", "cli" }, out uninstall, out quiet, out help, out components) && quiet && components == InstallComponents.Cli, "标准静默 CLI 选择无效");
+        Check(SetupProgram.TryParseArguments(new string[] { "install", "--components", "desktop,cli", "--quiet" }, out uninstall, out quiet, out help, out components) && components == InstallComponents.All, "双选参数无效");
+        foreach (string[] args in new string[][] {
+            new string[] { "--quiet" }, new string[] { "--components", "cli" }, new string[] { "install", "--components" },
+            new string[] { "install", "--components", "" }, new string[] { "uninstall", "--components", "cli" },
+            new string[] { "install", "--quiet", "--quiet" }, new string[] { "install", "--components", "cli", "--components", "desktop" },
+            new string[] { "install", "--components", "cli,cli" }, new string[] { "install", "--components", "unknown" },
+            new string[] { "install", "--help" }, new string[] { "install", "--components=cli" }
+        }) Check(!SetupProgram.TryParseArguments(args, out uninstall, out quiet, out help, out components), "歧义/错误参数被接受：" + String.Join(" ",args));
+    }
+    private static void ComponentOwnership()
+    {
+        foreach (InstallComponents selected in new InstallComponents[] { InstallComponents.Desktop, InstallComponents.Cli }) {
+            InstallConfiguration c = Configuration("component-unowned");
+            try {
+                Directory.CreateDirectory(c.InstallDirectory);
+                string foreign = Path.Combine(c.InstallDirectory, selected == InstallComponents.Desktop ? "codex-switch.exe" : "CodexSwitch.exe");
+                File.WriteAllText(foreign,"foreign");
+                new InstallService(c).Install(selected);
+                Fails(delegate { new InstallService(c).Install(InstallComponents.All); }, "不属于");
+                new InstallService(c).Uninstall();
+                Check(File.ReadAllText(foreign) == "foreign", "未选组件外来文件被修改");
+            } finally { CleanRegistry(c); }
+        }
+        InstallConfiguration preexisting = Configuration("component-path");
+        try {
+            SetPath(preexisting, preexisting.InstallDirectory + ";C:\\user", RegistryValueKind.String);
+            new InstallService(preexisting).Install(InstallComponents.Cli);
+            new InstallService(preexisting).Install(InstallComponents.Desktop);
+            new InstallService(preexisting).Uninstall();
+            Check((string)Raw(preexisting,"Path") == preexisting.InstallDirectory + ";C:\\user", "移除 CLI 删除用户原有 PATH");
+        } finally { CleanRegistry(preexisting); }
+    }
+    private static void Components()
+    {
+        foreach (InstallComponents selected in new InstallComponents[] { InstallComponents.Desktop, InstallComponents.Cli, InstallComponents.All }) {
+            InstallConfiguration c = Configuration("components");
+            try {
+                InstallService service = new InstallService(c);
+                Check(service.GetDefaultComponents() == InstallComponents.All, "首次默认必须全选");
+                service.Install(selected);
+                Check(File.Exists(Product(c)) == ((selected & InstallComponents.Desktop) != 0), "桌面文件不匹配组件");
+                Check(File.Exists(Path.Combine(c.InstallDirectory,"codex-switch.exe")) == ((selected & InstallComponents.Cli) != 0), "CLI 文件不匹配组件");
+                Check(File.Exists(Path.Combine(c.ProgramsDirectory,"Codex Switch","Codex Switch.lnk")) == ((selected & InstallComponents.Desktop) != 0), "快捷方式不匹配组件");
+                Check((Raw(c,"Path") != null) == ((selected & InstallComponents.Cli) != 0), "PATH 不匹配组件");
+                Check(service.GetDefaultComponents() == selected, "已有安装默认未保持组件");
+                service.Install();
+                Check(service.GetDefaultComponents() == selected, "无显式组件升级改变组件");
+                Fails(delegate { service.Install((InstallComponents)0); }, "至少选择");
+                Fails(delegate { service.Install((InstallComponents)8); }, "有效组件");
+                using (RegistryKey entry = Registry.CurrentUser.OpenSubKey(c.UninstallKey)) {
+                    Check((string)entry.GetValue("InstalledComponents") == InstallService.ComponentText(selected), "登记未记录实际组件");
+                    string icon = (string)entry.GetValue("DisplayIcon");
+                    Check(icon.Contains(selected == InstallComponents.Cli ? Path.Combine(c.HelperDirectory,"uninstall.exe") : Product(c)), "图标登记指向未安装文件");
+                }
+                string savedState = File.ReadAllText(Path.Combine(c.InstallDirectory,".codex-switch-install.xml"));
+                object savedPath = Raw(c,"Path");
+                foreach (string point in new string[] { "files", "path", "registration" }) {
+                    c.Fault = delegate(string p) { if (p == point) throw new IOException("组件失败"); };
+                    Fails(delegate { service.Install(selected == InstallComponents.Cli ? InstallComponents.Desktop : InstallComponents.Cli); }, "组件失败");
+                    Check(service.GetDefaultComponents() == selected && File.Exists(Product(c)) == ((selected & InstallComponents.Desktop) != 0), "组件变更未回滚");
+                    Check(File.ReadAllText(Path.Combine(c.InstallDirectory,".codex-switch-install.xml")) == savedState && Object.Equals(Raw(c,"Path"),savedPath), "组件事务未恢复 state/PATH");
+                    using (RegistryKey entry = Registry.CurrentUser.OpenSubKey(c.UninstallKey)) Check((string)entry.GetValue("InstalledComponents") == InstallService.ComponentText(selected), "组件登记未回滚");
+                }
+                c.Fault = null;
+                service.Install(selected == InstallComponents.Cli ? InstallComponents.Desktop : InstallComponents.Cli);
+                Check(File.Exists(Product(c)) == (selected == InstallComponents.Cli), "组件增删未生效");
+                Check((Raw(c,"Path") == null) == (selected == InstallComponents.Cli), "移除 CLI 未清理 PATH");
+                service.Uninstall();
+                Check(!File.Exists(Product(c)) && Raw(c,"Path") == null, "组件卸载有残留");
+            } finally { CleanRegistry(c); }
+        }
+        InstallConfiguration legacy = Configuration("legacy-state");
+        try {
+            legacy.Version = new Version("0.4.3.0");
+            new InstallService(legacy).Install();
+            string state = Path.Combine(legacy.InstallDirectory,".codex-switch-install.xml");
+            var document = new System.Xml.XmlDocument(); document.Load(state); document.DocumentElement.RemoveAttribute("components"); document.Save(state);
+            legacy.Version = new Version("0.4.4.0");
+            new InstallService(legacy).Install();
+            Check(new InstallService(legacy).GetDefaultComponents() == InstallComponents.All, "v0.4.3 旧记录升级丢失组件");
+            new InstallService(legacy).Uninstall();
+        } finally { CleanRegistry(legacy); }
+    }
     public static int Main(string[] args)
     {
         if (args.Length == 1 && args[0] == "--hold") { Console.WriteLine("ready"); Thread.Sleep(30000); return 0; }
@@ -363,7 +451,7 @@ internal static class InstallerServiceTests
             } catch (Exception e) { Console.Error.WriteLine(e); return 1; }
         }
         scratch = args[0];
-        try { LeafOwnershipMetadataPolicy(); Lifecycle(); OwnershipAndPath(); RollbackAndLocks(); RollbackPreservesIndependentFiles(); TransactionObjectOwnership(); LegacyAndUnsafe(); RealImagesAndConcurrency(); ShortcutAndRegistration(); CleanupFailureAfterCommit(); Console.WriteLine("PASS " + assertions + " assertions"); return 0; }
+        try { Arguments(); Components(); ComponentOwnership(); LeafOwnershipMetadataPolicy(); Lifecycle(); OwnershipAndPath(); RollbackAndLocks(); RollbackPreservesIndependentFiles(); TransactionObjectOwnership(); LegacyAndUnsafe(); RealImagesAndConcurrency(); ShortcutAndRegistration(); CleanupFailureAfterCommit(); Console.WriteLine("PASS " + assertions + " assertions"); return 0; }
         catch (Exception e) { Console.Error.WriteLine(e); return 1; }
     }
 }
@@ -371,5 +459,5 @@ internal static class InstallerServiceTests
 namespace CodexSwitch.Setup
 {
     // Compile-time stand-in: the helper's production GUI is provided by SetupForm.cs.
-    internal static class SetupForm { internal static int Run(InstallService service, bool uninstall) { service.Uninstall(); return 0; } }
+    internal static class SetupForm { internal static int Run(InstallService service, bool uninstall, InstallComponents? components = null) { service.Uninstall(); return 0; } }
 }

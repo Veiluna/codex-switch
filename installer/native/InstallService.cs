@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -13,6 +13,9 @@ using Microsoft.Win32.SafeHandles;
 
 namespace CodexSwitch.Setup
 {
+    [Flags]
+    internal enum InstallComponents { Desktop = 1, Cli = 2, All = Desktop | Cli }
+
     // Only the in-assembly test harness supplies this configuration. No command-line or
     // registry value is ever used as a filesystem deletion root.
     internal sealed class InstallConfiguration
@@ -80,7 +83,7 @@ namespace CodexSwitch.Setup
         private const string Owner = "CodexSwitch.NativeInstaller.1";
         private const string StateName = ".codex-switch-install.xml";
         private static readonly string[] PayloadNames = { "CodexSwitch.exe", "codex-switch.exe", "uninstall.exe" };
-        private static readonly string[] RegistrationNames = { "NativeInstallerOwner", "DisplayName", "DisplayVersion", "Publisher", "InstallLocation", "UninstallString", "QuietUninstallString", "DisplayIcon", "NoModify", "NoRepair", "EstimatedSize" };
+        private static readonly string[] RegistrationNames = { "NativeInstallerOwner", "DisplayName", "DisplayVersion", "Publisher", "InstallLocation", "UninstallString", "QuietUninstallString", "DisplayIcon", "InstalledComponents", "NoModify", "NoRepair", "EstimatedSize" };
         private readonly InstallConfiguration configuration;
         internal string DirectoryPath { get { return configuration.InstallDirectory; } }
         // A running uninstall helper is renamed to this unique cache filename. Only
@@ -93,10 +96,35 @@ namespace CodexSwitch.Setup
             this.configuration = configuration;
         }
 
-        internal void Install() { Execute(false); }
-        internal void Uninstall() { Execute(true); }
+        internal InstallComponents GetDefaultComponents()
+        {
+            ValidateRoot(DirectoryPath);
+            string path = Path.Combine(DirectoryPath, StateName);
+            return File.Exists(path) ? InstallState.Read(File.ReadAllBytes(path)).Components : InstallComponents.All;
+        }
+        internal void Install() { Execute(false, null); }
+        internal void Install(InstallComponents components) { Execute(false, components); }
+        internal void Uninstall() { Execute(true, null); }
 
-        private void Execute(bool uninstall)
+        internal static string ComponentText(InstallComponents components)
+        {
+            if (components == InstallComponents.Desktop) return "desktop";
+            if (components == InstallComponents.Cli) return "cli";
+            if (components == InstallComponents.All) return "desktop,cli";
+            throw new InvalidOperationException("请至少选择一个有效组件。");
+        }
+        internal static InstallComponents ParseComponents(string text)
+        {
+            if (text == "desktop") return InstallComponents.Desktop;
+            if (text == "cli") return InstallComponents.Cli;
+            if (text == "desktop,cli" || text == "cli,desktop") return InstallComponents.All;
+            throw new InvalidOperationException("请至少选择一个有效组件：desktop、cli 或 desktop,cli。");
+        }
+        private static bool Includes(InstallComponents components, string name)
+        {
+            return name == "uninstall.exe" || (components & (name == "CodexSwitch.exe" ? InstallComponents.Desktop : InstallComponents.Cli)) != 0;
+        }
+        private void Execute(bool uninstall, InstallComponents? requested)
         {
             bool acquired = false;
             try {
@@ -106,7 +134,7 @@ namespace CodexSwitch.Setup
                 using (Mutex mutex = new Mutex(false, configuration.MutexName)) {
                     try { acquired = mutex.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
                     if (!acquired) throw new InvalidOperationException("另一个安装或卸载操作正在进行，请等待完成后重试。");
-                    try { ExecuteLocked(uninstall); }
+                    try { ExecuteLocked(uninstall, requested); }
                     finally { mutex.ReleaseMutex(); }
                 }
             } catch (Exception error) {
@@ -115,7 +143,7 @@ namespace CodexSwitch.Setup
             }
         }
 
-        private void ExecuteLocked(bool uninstall)
+        private void ExecuteLocked(bool uninstall, InstallComponents? requested)
         {
             CheckLegacy();
             string statePath = Path.Combine(DirectoryPath, StateName);
@@ -131,18 +159,26 @@ namespace CodexSwitch.Setup
             if (!uninstall && oldState != null && oldState.Version.CompareTo(configuration.Version) > 0)
                 throw new InvalidOperationException("已安装较新版本，请使用同版或更新的安装程序。");
 
+            InstallComponents selected = uninstall ? (InstallComponents)0 : requested ?? (oldState == null ? InstallComponents.All : oldState.Components);
+            if (!uninstall) ComponentText(selected); // Validate before any mutation.
+            bool desktop = (selected & InstallComponents.Desktop) != 0;
+            bool cli = (selected & InstallComponents.Cli) != 0;
+            bool oldDesktop = oldState != null && (oldState.Components & InstallComponents.Desktop) != 0;
+            bool oldCli = oldState != null && (oldState.Components & InstallComponents.Cli) != 0;
             string shortcutDirectory = Path.Combine(configuration.ProgramsDirectory, "Codex Switch");
             string shortcutPath = Path.Combine(shortcutDirectory, "Codex Switch.lnk");
             ValidateRoot(shortcutDirectory);
-            PathValue pathBefore = PathValue.Read(configuration.EnvironmentKey);
+            PathValue pathBefore = cli || oldCli ? PathValue.Read(configuration.EnvironmentKey) : new PathValue(false, "", RegistryValueKind.ExpandString);
             InstallState next = uninstall ? null : new InstallState();
             Dictionary<string, byte[]> payload = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
             if (!uninstall) {
                 next.Version = configuration.Version;
+                next.Components = selected;
                 next.PathOwned = oldState != null && oldState.PathOwned;
                 next.PathBefore = oldState != null ? oldState.PathBefore : pathBefore;
                 next.PathAfter = oldState != null ? oldState.PathAfter : null;
                 foreach (string name in PayloadNames) {
+                    if (!Includes(selected, name)) continue;
                     byte[] bytes = configuration.LoadPayload("Payload." + name);
                     if (bytes == null || bytes.Length == 0) throw new InvalidOperationException("安装包包含空程序资源，请重新下载。");
                     payload.Add(name, bytes);
@@ -159,18 +195,23 @@ namespace CodexSwitch.Setup
             using (FileTransaction files = new FileTransaction(configuration.Fault)) {
                 try {
                     foreach (string name in PayloadNames) {
+                        if (!Includes(selected, name) && (oldState == null || !oldState.Hashes.ContainsKey(name))) continue;
                         string target = PayloadTarget(name);
                         bool runningHelper = uninstall && name == "uninstall.exe" && String.Equals(Assembly.GetExecutingAssembly().Location, target, StringComparison.OrdinalIgnoreCase);
-                        files.Acquire(target, oldState == null ? null : oldState.Hashes[name], runningHelper);
+                        files.Acquire(target, oldState == null || !oldState.Hashes.ContainsKey(name) ? null : oldState.Hashes[name], runningHelper);
                     }
                     files.Acquire(statePath, stateBytes == null ? null : Hash(stateBytes));
-                    files.Acquire(shortcutPath, oldState == null ? null : oldState.ShortcutHash);
+                    if (desktop || oldDesktop) files.Acquire(shortcutPath, oldState == null ? null : oldState.ShortcutHash);
 
                     if (!uninstall) {
                         Directory.CreateDirectory(DirectoryPath);
-                        Directory.CreateDirectory(shortcutDirectory);
+                        if (desktop) Directory.CreateDirectory(shortcutDirectory);
                         Directory.CreateDirectory(configuration.HelperDirectory);
-                        foreach (string name in PayloadNames) files.Replace(PayloadTarget(name), payload[name]);
+                        foreach (string name in PayloadNames) {
+                            if (payload.ContainsKey(name)) files.Replace(PayloadTarget(name), payload[name]);
+                            else if (oldState != null && oldState.Hashes.ContainsKey(name)) files.Remove(PayloadTarget(name));
+                        }
+                        if (desktop) {
                         // Build the shortcut beside its final name, preserving .lnk for WSH.
                         string stagedLink = Path.Combine(shortcutDirectory, ".cs-" + Guid.NewGuid().ToString("N") + ".lnk");
                         try {
@@ -178,8 +219,15 @@ namespace CodexSwitch.Setup
                             next.ShortcutHash = Hash(File.ReadAllBytes(stagedLink));
                             files.Replace(shortcutPath, File.ReadAllBytes(stagedLink));
                         } finally { if (File.Exists(stagedLink)) File.Delete(stagedLink); }
+                        } else if (oldDesktop) files.Remove(shortcutPath);
                         PathValue pathAfter = pathBefore;
-                        if (!ContainsPath(pathBefore.Text, DirectoryPath)) {
+                        if (!cli && oldCli) {
+                            pathAfter = RemoveOwnedPath(pathBefore, oldState);
+                            next.PathOwned = false;
+                            next.PathBefore = pathAfter;
+                            next.PathAfter = null;
+                        }
+                        if (cli && !ContainsPath(pathBefore.Text, DirectoryPath)) {
                             pathAfter = pathBefore.Append(DirectoryPath);
                             next.PathOwned = true;
                             next.PathBefore = pathBefore;
@@ -194,8 +242,8 @@ namespace CodexSwitch.Setup
                         registrationWritten = RegistrySnapshot.Read(configuration.UninstallKey, RegistrationNames);
                         Fault("registration");
                     } else {
-                        foreach (string name in PayloadNames) files.Remove(PayloadTarget(name));
-                        files.Remove(shortcutPath);
+                        foreach (string name in oldState.Hashes.Keys) files.Remove(PayloadTarget(name));
+                        if (oldDesktop) files.Remove(shortcutPath);
                         files.Remove(statePath);
                         Fault("files");
                         PathValue after = RemoveOwnedPath(pathBefore, oldState);
@@ -233,7 +281,8 @@ namespace CodexSwitch.Setup
                     throw;
                 }
             }
-            if (uninstall) { TryRemoveEmpty(DirectoryPath); TryRemoveEmpty(shortcutDirectory); TryRemoveEmpty(configuration.HelperDirectory); }
+            if (uninstall) { TryRemoveEmpty(DirectoryPath); TryRemoveEmpty(configuration.HelperDirectory); }
+            if (!desktop) TryRemoveEmpty(shortcutDirectory);
             if (configuration.BroadcastEnvironment) NotifyEnvironment();
         }
 
@@ -285,7 +334,8 @@ namespace CodexSwitch.Setup
                 string helper = "\"" + PayloadTarget("uninstall.exe") + "\"";
                 key.SetValue("UninstallString", helper, RegistryValueKind.String);
                 key.SetValue("QuietUninstallString", helper + " --quiet", RegistryValueKind.String);
-                key.SetValue("DisplayIcon", "\"" + Path.Combine(DirectoryPath, "CodexSwitch.exe") + "\",0", RegistryValueKind.String);
+                key.SetValue("DisplayIcon", "\"" + ((state.Components & InstallComponents.Desktop) != 0 ? Path.Combine(DirectoryPath, "CodexSwitch.exe") : PayloadTarget("uninstall.exe")) + "\",0", RegistryValueKind.String);
+                key.SetValue("InstalledComponents", ComponentText(state.Components), RegistryValueKind.String);
                 key.SetValue("NoModify", 1, RegistryValueKind.DWord);
                 key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
                 int total = 0; foreach (byte[] bytes in payload.Values) total += bytes.Length;
@@ -431,6 +481,7 @@ namespace CodexSwitch.Setup
         private sealed class InstallState
         {
             internal Version Version;
+            internal InstallComponents Components;
             internal Dictionary<string, string> Hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             internal string ShortcutHash;
             internal bool PathOwned;
@@ -440,8 +491,9 @@ namespace CodexSwitch.Setup
             {
                 XmlDocument document = new XmlDocument();
                 XmlElement root = document.CreateElement("installation"); document.AppendChild(root);
-                root.SetAttribute("owner", Owner); root.SetAttribute("version", Version.ToString()); root.SetAttribute("shortcut", ShortcutHash);
-                foreach (string name in PayloadNames) { XmlElement file = document.CreateElement("file"); file.SetAttribute("name", name); file.SetAttribute("sha256", Hashes[name]); root.AppendChild(file); }
+                root.SetAttribute("owner", Owner); root.SetAttribute("version", Version.ToString()); root.SetAttribute("components", ComponentText(Components));
+                if (ShortcutHash != null) root.SetAttribute("shortcut", ShortcutHash);
+                foreach (string name in Hashes.Keys) { XmlElement file = document.CreateElement("file"); file.SetAttribute("name", name); file.SetAttribute("sha256", Hashes[name]); root.AppendChild(file); }
                 XmlElement path = document.CreateElement("path"); root.AppendChild(path);
                 path.SetAttribute("owned", PathOwned ? "true" : "false"); path.SetAttribute("existed", PathBefore.Exists ? "true" : "false"); path.SetAttribute("kind", ((int)PathBefore.Kind).ToString());
                 path.SetAttribute("before", PathBefore.Text); path.SetAttribute("after", PathAfter ?? "");
@@ -458,16 +510,20 @@ namespace CodexSwitch.Setup
                     if (root == null || root.Name != "installation" || root.GetAttribute("owner") != Owner) throw new InvalidDataException();
                     InstallState state = new InstallState();
                     state.Version = new Version(root.GetAttribute("version"));
-                    state.ShortcutHash = root.GetAttribute("shortcut"); ValidateHash(state.ShortcutHash);
+                    state.Components = root.HasAttribute("components") ? ParseComponents(root.GetAttribute("components")) : InstallComponents.All;
+                    state.ShortcutHash = root.HasAttribute("shortcut") ? root.GetAttribute("shortcut") : null;
+                    if ((state.Components & InstallComponents.Desktop) != 0) ValidateHash(state.ShortcutHash);
+                    else if (state.ShortcutHash != null) throw new InvalidDataException();
                     foreach (XmlNode node in root.SelectNodes("file")) {
                         XmlElement file = (XmlElement)node; string name = file.GetAttribute("name"); string sha = file.GetAttribute("sha256");
                         if (Array.IndexOf(PayloadNames, name) < 0 || state.Hashes.ContainsKey(name)) throw new InvalidDataException();
                         ValidateHash(sha); state.Hashes.Add(name, sha);
                     }
-                    if (state.Hashes.Count != PayloadNames.Length) throw new InvalidDataException();
+                    foreach (string name in PayloadNames) if (state.Hashes.ContainsKey(name) != Includes(state.Components, name)) throw new InvalidDataException();
                     XmlElement path = (XmlElement)root.SelectSingleNode("path");
                     if (path == null) throw new InvalidDataException();
                     state.PathOwned = Boolean.Parse(path.GetAttribute("owned"));
+                    if (state.PathOwned && (state.Components & InstallComponents.Cli) == 0) throw new InvalidDataException();
                     RegistryValueKind kind = (RegistryValueKind)Int32.Parse(path.GetAttribute("kind"));
                     if (kind != RegistryValueKind.String && kind != RegistryValueKind.ExpandString) throw new InvalidDataException();
                     state.PathBefore = new PathValue(Boolean.Parse(path.GetAttribute("existed")), path.GetAttribute("before"), kind);

@@ -6,7 +6,7 @@ $scratch = Join-Path $PSScriptRoot ('.tmp-native-installer-' + [Guid]::NewGuid()
 [void][IO.Directory]::CreateDirectory($scratch)
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $exe = Join-Path $scratch 'InstallerServiceTests.exe'
-& $compiler /nologo /langversion:5 /codepage:65001 /platform:x64 /target:exe /main:InstallerServiceTests ('/out:' + $exe) /reference:System.dll /reference:System.Core.dll /reference:System.Xml.dll /reference:Microsoft.CSharp.dll /reference:System.Windows.Forms.dll (Join-Path $root 'installer\native\InstallService.cs') (Join-Path $root 'installer\native\UninstallHost.cs') (Join-Path $PSScriptRoot 'InstallerServiceTests.cs')
+& $compiler /nologo /langversion:5 /codepage:65001 /platform:x64 /target:exe /main:InstallerServiceTests ('/out:' + $exe) /reference:System.dll /reference:System.Core.dll /reference:System.Xml.dll /reference:Microsoft.CSharp.dll /reference:System.Windows.Forms.dll (Join-Path $root 'installer\native\InstallService.cs') (Join-Path $root 'installer\native\UninstallHost.cs') (Join-Path $root 'installer\native\SetupProgram.cs') (Join-Path $PSScriptRoot 'InstallerServiceTests.cs')
 if ($LASTEXITCODE -ne 0) { throw '安装服务隔离测试编译失败。' }
 & $exe $scratch
 if ($LASTEXITCODE -ne 0) { throw '安装服务隔离测试失败。' }
