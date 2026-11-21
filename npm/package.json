@@ -1,0 +1,20 @@
+{
+  "name": "@veiluna/codex-switch",
+  "version": "0.4.0",
+  "description": "Windows x64 native Codex account switcher and installer",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "engines": { "node": ">=18" },
+  "bin": {
+    "codex-switch": "bin/codex-switch.cjs",
+    "codex-switch-install": "bin/codex-switch-install.cjs"
+  },
+  "files": [
+    "README.md",
+    "bin/codex-switch.cjs",
+    "bin/codex-switch-install.cjs",
+    "bin/run-native.cjs",
+    "native/codex-switch.exe",
+    "native/installer.exe"
+  ]
+}
