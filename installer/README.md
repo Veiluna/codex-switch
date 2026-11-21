@@ -1,13 +1,16 @@
 # Windows 构建和安装
 
-在 Windows x64 上运行 `build.cmd`。默认版本为 0.3.0，也可传入 `-Version`。构建先用系统 .NET Framework 的 C# 5 编译器生成共享核心，其中嵌入五个兼容脚本资源；随后将完全相同的核心嵌入桌面和命令行 EXE。MakeCab 和 Windows Installer COM 将两个正式程序打入 MSI。源码、依赖、产物及 SHA-256 记录在 `dist/build-info.json`。
+在 Windows x64 上运行 `build.cmd`，默认生成 0.4.0 的两个便携 EXE、自研 `installer.exe`、npm tarball 和 `SHA256SUMS.txt`。Windows 原生程序使用系统 .NET Framework 4.8 C# 编译器和 Windows PowerShell 5.1。构建 npm 格式的附件时使用 npm；仅构建原生发行物可加 `-SkipNpm`。用户下载后双击安装或使用静默安装均可离线完成。
 
-MSI 面向当前用户，默认安装在 `%LOCALAPPDATA%\Programs\CodexSwitch`，创建开始菜单快捷方式，并将安装目录追加到用户 PATH。重新打开终端后可以直接输入 `codex-switch`。升级采用原产品家族的 UpgradeCode 和递增版本。卸载移除已安装的两个程序、快捷方式及对应 PATH 条目，保留其他用户数据。
+安装器编译时将最终桌面端、CLI 和卸载入口嵌入自身。两个应用继续使用相同的本地账号核心。构建记录位于 `dist/build-info.json`。安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\CodexSwitch`，管理开始菜单入口、用户 PATH 和 Windows 应用列表的卸载项。旧 MSI 的测试构建器保存在 `tests/legacy-msi`，仅用于历史兼容验证。
+
+## 验收
 
 ```powershell
 .\build.cmd
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-NativeDistribution.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SetupEntry.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Installer.ps1
 ```
 
-分发测试核对源码、两个主程序内的共享核心、五个脚本资源与 MSI 内两个文件的 SHA-256。安装测试使用独立测试产品和临时环境变量，实际安装旧版夹具、升级到双程序版、尝试降级再卸载，同时核对用户原有数据。PATH 条目的追加与卸载遵循 [Windows Installer Environment 表](https://learn.microsoft.com/en-us/windows/win32/msi/environment-table)。
+分发测试核对两个便携程序的共享核心、安装器的三个资源和最终附件摘要。入口测试启动正式安装器，检查帮助、无效参数与图形取消。生命周期测试将安装器服务的文件和注册表目标切换到隔离夹具，保留正式程序资源与快捷方式创建逻辑。

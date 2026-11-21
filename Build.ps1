@@ -1,4 +1,4 @@
-param([ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$Version = '0.3.0', [switch]$SkipInstaller)
+param([ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$Version = '0.4.0', [switch]$SkipInstaller, [switch]$SkipNpm)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 $root = $PSScriptRoot
@@ -54,11 +54,29 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Desktop compilation failed.' }
     & $compiler @hostArgs '/target:exe' '/define:CLI' ('/out:' + $cli) $versionSource $hostSources.FullName $cliSources.FullName
     if ($LASTEXITCODE -ne 0) { throw 'CLI compilation failed.' }
-    $msiPath = Join-Path $work ('CodexSwitch-' + $Version + '-x64.msi')
-    if (-not $SkipInstaller) { & (Join-Path $root 'installer\New-Msi.ps1') -ExecutablePath $exe -CliPath $cli -OutputPath $msiPath -Version $Version }
     $artifacts = @($exe, $cli)
-    if (-not $SkipInstaller) { $artifacts += $msiPath }
-    $inputFiles = @($sources.FullName) + @($embeddedNames | ForEach-Object { Join-Path $root $_ }) + @((Join-Path $root 'Build.ps1'),(Join-Path $root 'installer\New-Msi.ps1'),(Join-Path $root 'installer\app.manifest'))
+    $inputFiles = @($sources.FullName) + @($embeddedNames | ForEach-Object { Join-Path $root $_ }) + @((Join-Path $root 'Build.ps1'),(Join-Path $root 'installer\app.manifest'))
+    if (-not $SkipInstaller) {
+        $setupSources = @(Get-ChildItem -LiteralPath (Join-Path $root 'installer\native') -Filter '*.cs' -File | Sort-Object Name)
+        $sharedSetup = @($setupSources | Where-Object { $_.Name -notin @('SetupProgram.cs','UninstallHost.cs') } | ForEach-Object { $_.FullName })
+        $setupArgs = @('/target:winexe', '/reference:Microsoft.CSharp.dll', ('/win32manifest:' + (Join-Path $root 'installer\app.manifest'))) + $common
+        $uninstaller = Join-Path $work 'uninstall.exe'
+        & $compiler @setupArgs '/main:CodexSwitch.Setup.UninstallHost' ('/out:' + $uninstaller) $versionSource $sharedSetup (Join-Path $root 'installer\native\UninstallHost.cs')
+        if ($LASTEXITCODE -ne 0) { throw 'Uninstaller compilation failed.' }
+        $installer = Join-Path $work 'installer.exe'
+        $payloadArgs = @('/resource:' + $exe + ',Payload.CodexSwitch.exe'
+                         '/resource:' + $cli + ',Payload.codex-switch.exe'
+                         '/resource:' + $uninstaller + ',Payload.uninstall.exe')
+        & $compiler @setupArgs @payloadArgs '/main:CodexSwitch.Setup.SetupProgram' ('/out:' + $installer) $versionSource $sharedSetup (Join-Path $root 'installer\native\SetupProgram.cs')
+        if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
+        $artifacts += $installer
+        $inputFiles += $setupSources.FullName
+        if (-not $SkipNpm) {
+            & (Join-Path $root 'npm\Pack.ps1') -Version $Version -DistPath $work -OutputDirectory $work
+            $artifacts += Join-Path $work ('veiluna-codex-switch-' + $Version + '.tgz')
+            $inputFiles += @(Get-ChildItem -Recurse -File -LiteralPath (Join-Path $root 'npm') | ForEach-Object { $_.FullName })
+        }
+    }
     $report = [ordered]@{
         Version = $Version; Target = 'Windows x64; .NET Framework 4.x; Windows PowerShell 5.1'; Compiler = $compiler;
         CompilerVersion = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion;
@@ -74,6 +92,8 @@ try {
     $metadata = Join-Path $work 'build-info.json'
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $metadata -Encoding UTF8
     foreach ($artifact in $artifacts) { Copy-Item -LiteralPath $artifact -Destination $dist -Force }
+    $sums = @($report.Artifacts | ForEach-Object { $_.SHA256.ToLowerInvariant() + '  ' + $_.Name })
+    [IO.File]::WriteAllLines((Join-Path $dist 'SHA256SUMS.txt'), [string[]]$sums, [Text.Encoding]::ASCII)
     Copy-Item -LiteralPath $metadata -Destination $dist -Force
     Write-Host ('Built desktop and CLI in ' + $dist)
     Write-Host ('Build metadata: ' + (Join-Path $dist 'build-info.json'))

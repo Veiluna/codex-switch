@@ -1,4 +1,4 @@
-param([string]$DistPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'dist'))
+﻿param([string]$DistPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'dist'))
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 $root = Split-Path -Parent $PSScriptRoot
@@ -38,26 +38,24 @@ foreach ($name in @('UiStyle.ps1','Desktop.ps1','AccountList.ps1','AccountSwitch
 }
 Assert-True ($assembly.GetName().Name -eq 'CodexSwitch.Core') 'Incorrect core assembly name.'
 Assert-True ($assembly.GetName().ProcessorArchitecture.ToString() -eq 'Amd64') 'Application is not x64.'
-$scratch = Join-Path $PSScriptRoot ('.tmp-native-package-' + [Guid]::NewGuid().ToString('N'))
-$null = New-Item -ItemType Directory -Path $scratch
-$msi = Join-Path $DistPath ('CodexSwitch-' + $metadata.Version + '-x64.msi')
-$installer = New-Object -ComObject WindowsInstaller.Installer
-$db = $installer.OpenDatabase([IO.Path]::GetFullPath($msi), 0)
-$view = $db.OpenView('SELECT `Data` FROM `_Streams` WHERE `Name` = ''payload.cab''')
-[void]$view.Execute()
-$record = $view.Fetch()
-try {
-    Assert-True ($null -ne $record) 'MSI payload cabinet is missing.'
-    # msiReadStreamBytes (1) returns BSTR with one byte per character, not a byte SAFEARRAY.
-    $data = $record.GetType().InvokeMember('ReadStream', [Reflection.BindingFlags]::InvokeMethod, $null, $record, @(1, [int](Get-Item -LiteralPath $msi).Length, 1))
-    $cab = Join-Path $scratch 'payload.cab'
-    [IO.File]::WriteAllBytes($cab, [Text.Encoding]::GetEncoding(28591).GetBytes([string]$data))
-    & "$env:WINDIR\System32\expand.exe" $cab '-F:*' $scratch | Out-Null
-    Assert-True ($LASTEXITCODE -eq 0) 'MSI cabinet could not be extracted.'
-    Assert-True ((Get-Sha256 (Join-Path $scratch 'AppExecutable')) -eq (Get-Sha256 $exe)) 'MSI does not contain the final application executable.'
-    Assert-True ((Get-Sha256 (Join-Path $scratch 'CliExecutable')) -eq (Get-Sha256 $cli)) 'MSI does not contain the final CLI.'
-} finally {
-    [void]$view.Close()
-    foreach ($item in @($record,$view,$db,$installer)) { if ($null -ne $item) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($item) } }
+$setup = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $DistPath 'installer.exe')))
+Assert-True ($setup.EntryPoint.DeclaringType.FullName -eq 'CodexSwitch.Setup.SetupProgram') 'Unexpected installer entry point.'
+$resources = @($setup.GetManifestResourceNames())
+Assert-True ($resources.Count -eq 3) 'Unexpected installer payload count.'
+foreach ($fileName in @('CodexSwitch.exe','codex-switch.exe','uninstall.exe')) {
+    Assert-True ($resources -ccontains ('Payload.' + $fileName)) ('Missing installer resource: ' + $fileName)
+    $stream = $setup.GetManifestResourceStream('Payload.' + $fileName)
+    $image = New-Object IO.MemoryStream
+    try {
+        $stream.CopyTo($image)
+        if ($fileName -eq 'uninstall.exe') {
+            $helper = [Reflection.Assembly]::Load($image.ToArray())
+            Assert-True ($helper.EntryPoint.DeclaringType.FullName -eq 'CodexSwitch.Setup.UninstallHost') 'Incorrect uninstaller.'
+        } else {
+            $digest = [Security.Cryptography.SHA256]::Create()
+            try { $embedded = [BitConverter]::ToString($digest.ComputeHash($image.ToArray())).Replace('-','') } finally { $digest.Dispose() }
+            Assert-True ($embedded -eq (Get-Sha256 (Join-Path $DistPath $fileName))) ('Wrong embedded program: ' + $fileName)
+        }
+    } finally { $stream.Dispose(); $image.Dispose() }
 }
-Write-Host ('PASS: current sources, recorded hashes, x64 app entry point, exact embedded scripts and exact MSI executable payload. Evidence: ' + $scratch)
+Write-Host 'PASS: verified source hashes, independent installer entry, matching GUI and CLI bytes, shared core and uninstall helper.'
