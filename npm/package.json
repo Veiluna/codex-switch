@@ -1,6 +1,6 @@
 {
   "name": "@veiluna/codex-switch",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Windows x64 native Codex account switcher and installer",
   "os": ["win32"],
   "cpu": ["x64"],

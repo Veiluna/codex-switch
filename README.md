@@ -6,9 +6,11 @@
 
 ## 下载与安装
 
-从 [GitHub 最新发布页](https://github.com/Veiluna/codex-switch/releases/latest) 下载 Windows x64 安装程序。v0.4.4 的文件名为 `CodexSwitch-Setup-0.4.4-x64.exe`。
+从 [GitHub 最新发布页](https://github.com/Veiluna/codex-switch/releases/latest) 下载 Windows x64 安装程序。v0.4.5 的文件名为 `CodexSwitch-Setup-0.4.5-x64.exe`。
 
-双击安装器，在“桌面端”和“命令行（CLI）”中至少选择一项。首次安装默认全选，重新打开安装器会显示已安装的组件。桌面端会创建开始菜单快捷方式；CLI 安装完成后，可在新开的终端运行 `codex-switch`。再次运行安装器可以增减组件。
+双击安装器，点击“安装位置”旁的“浏览…”选择文件夹，也可直接输入本地绝对路径。程序会安装在框中显示的目录。已有安装改选目录时，界面会提示迁移，点击“安装”后才生效。
+
+在“桌面端”和“命令行（CLI）”中至少选择一项。首次安装默认全选，重新打开安装器会显示已安装的组件和路径。桌面端会创建开始菜单快捷方式；CLI 安装完成后，可在新开的终端运行 `codex-switch`。
 
 安装到当前 Windows 用户，使用系统 .NET Framework 4.8 和 Windows PowerShell 5.1。分发文件未签名。安装、升级和卸载均保留本机账号目录，默认路径为 `%USERPROFILE%\.codex`，也可以通过 `CODEX_HOME` 指定。
 
@@ -17,7 +19,7 @@
 在下载目录的 cmd 中只安装 CLI 并等待安装完成：
 
 ```cmd
-start "" /wait ".\CodexSwitch-Setup-0.4.4-x64.exe" install --quiet --components cli
+start "" /wait ".\CodexSwitch-Setup-0.4.5-x64.exe" install --quiet --components cli
 echo %ERRORLEVEL%
 ```
 

@@ -11,6 +11,7 @@ $serviceType = $setup.GetType('CodexSwitch.Setup.InstallService',$true)
 $componentsType = $setup.GetType('CodexSwitch.Setup.InstallComponents',$true)
 $install = $serviceType.GetMethod('Install',$fields,$null,[type[]]@(),$null)
 $selectInstall = $serviceType.GetMethod('Install',$fields,$null,[type[]]@($componentsType),$null)
+$installAt = $serviceType.GetMethod('Install',$fields,$null,[type[]]@($componentsType,[string]),$null)
 $uninstall = $serviceType.GetMethod('Uninstall',$fields)
 $nativeRegistry = [Microsoft.Win32.Registry]::CurrentUser
 function Assert-True([bool]$Condition,[string]$Message) { if (-not $Condition) { throw $Message } }
@@ -35,7 +36,12 @@ foreach ($components in @('Desktop','Cli','All')) {
     try { $fixture.SetValue('Path','%SystemRoot%\suite-fixture',[Microsoft.Win32.RegistryValueKind]::ExpandString) } finally { $fixture.Dispose() }
     try {
         $selection = [Enum]::Parse($componentsType,$components)
-        $selectInstall.Invoke($service,@($selection))
+        if ($components -eq 'Desktop') { $selectInstall.Invoke($service,@($selection)) }
+        else {
+            $directory = [IO.Path]::Combine($scratch,'Chosen Folder')
+            $installAt.Invoke($service,@($selection,$directory))
+        }
+        $service = $serviceType.GetConstructor($fields,$null,[type[]]@($type),$null).Invoke(@($config))
         $install.Invoke($service,$null) # Omitted selection must keep the installed components.
         $desktop = $components -ne 'Cli'; $cli = $components -ne 'Desktop'
         foreach ($name in @('CodexSwitch.exe','codex-switch.exe')) {
@@ -55,6 +61,7 @@ foreach ($components in @('Desktop','Cli','All')) {
         $entry = $nativeRegistry.OpenSubKey($key+'\Uninstall')
         try {
             Assert-True ($entry.GetValue('DisplayName') -eq 'Codex Switch') 'Uninstall registration missing.'
+            Assert-True ($entry.GetValue('InstallLocation') -eq $directory) 'Uninstall registration points to the wrong folder.'
             $recorded = if ($components -eq 'All') { 'desktop,cli' } else { $components.ToLowerInvariant() }
             Assert-True ($entry.GetValue('InstalledComponents') -ceq $recorded) 'Registration component set differs.'
             $iconTarget = if ($desktop) { Join-Path $directory 'CodexSwitch.exe' } else { Join-Path $values.HelperDirectory 'uninstall.exe' }
@@ -66,10 +73,17 @@ foreach ($components in @('Desktop','Cli','All')) {
         [IO.File]::WriteAllText($userFile,'preserve')
         # Exercise explicit add/remove using the same final installer assembly.
         $other = if ($components -eq 'Cli') { 'Desktop' } else { 'Cli' }
-        $selectInstall.Invoke($service,@([Enum]::Parse($componentsType,$other)))
+        $oldDirectory = $directory
+        $directory = [IO.Path]::Combine($scratch,'New Location')
+        [void][IO.Directory]::CreateDirectory($directory)
+        $installAt.Invoke($service,@([Enum]::Parse($componentsType,$other),$directory))
+        Assert-True ((Test-Path -LiteralPath $userFile) -and -not (Test-Path -LiteralPath (Join-Path $oldDirectory 'CodexSwitch.exe')) -and -not (Test-Path -LiteralPath (Join-Path $oldDirectory 'codex-switch.exe'))) 'Moving components removed an unrelated file or left an old executable.'
         Assert-True ((Test-Path -LiteralPath (Join-Path $directory 'CodexSwitch.exe')) -eq ($other -eq 'Desktop')) 'Explicit desktop change failed.'
         Assert-True ((Test-Path -LiteralPath (Join-Path $directory 'codex-switch.exe')) -eq ($other -eq 'Cli')) 'Explicit CLI change failed.'
+        $service = $serviceType.GetConstructor($fields,$null,[type[]]@($type),$null).Invoke(@($config))
+        Assert-True ($serviceType.GetProperty('DirectoryPath',$fields).GetValue($service,$null) -eq $directory) 'A new installer instance failed to resolve the moved directory.'
         $uninstall.Invoke($service,$null)
+        Assert-True ([IO.Directory]::Exists($directory)) 'Uninstall removed a pre-existing chosen directory.'
         Assert-True ((Test-Path -LiteralPath $userFile) -and -not (Test-Path -LiteralPath (Join-Path $directory 'codex-switch.exe')) -and -not (Test-Path -LiteralPath (Join-Path $directory 'CodexSwitch.exe'))) 'Uninstall ownership mismatch.'
         Assert-True (-not (Test-Path -LiteralPath $shortcutPath)) 'Shortcut was not removed.'
         Assert-True ($null -eq $nativeRegistry.OpenSubKey($key+'\Uninstall')) 'Uninstall registration remains.'

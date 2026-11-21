@@ -1,4 +1,4 @@
-param([ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$Version = '0.4.4', [switch]$SkipInstaller, [switch]$SkipNpm, [switch]$IncludeNpm)
+param([ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$Version = '0.4.5', [switch]$SkipInstaller, [switch]$SkipNpm, [switch]$IncludeNpm)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 $root = $PSScriptRoot

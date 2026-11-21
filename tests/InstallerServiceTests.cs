@@ -282,13 +282,15 @@ internal static class InstallerServiceTests
         try {
             byte[] image = File.ReadAllBytes(Assembly.GetExecutingAssembly().Location);
             c.LoadPayload = delegate(string n) { return image; };
-            new InstallService(c).Install();
-            using (Process product = Start(Product(c), "--hold")) {
+            string actualDirectory = Path.Combine(Path.GetDirectoryName(c.InstallDirectory),"Images 中文");
+            string productPath = Path.Combine(actualDirectory,"CodexSwitch.exe");
+            new InstallService(c).Install(InstallComponents.All,actualDirectory);
+            using (Process product = Start(productPath, "--hold")) {
                 Check(product.StandardOutput.ReadLine() == "ready", "运行夹具未启动");
                 try {
                     Fails(delegate { new InstallService(c).Install(); }, "正在使用");
                     Fails(delegate { new InstallService(c).Uninstall(); }, "正在使用");
-                    Check(File.Exists(Product(c)), "运行产品预检扰动现有安装");
+                    Check(File.Exists(productPath), "运行产品预检扰动现有安装");
                 } finally { product.Kill(); product.WaitForExit(); }
             }
             ManualResetEvent held = new ManualResetEvent(false);
@@ -305,7 +307,7 @@ internal static class InstallerServiceTests
                 helper.WaitForExit();
                 Check(helper.ExitCode == 0, "实进程卸载 helper 失败：" + errors);
             }
-            Check(!File.Exists(Product(c)), "同步返回后产品仍在");
+            Check(!File.Exists(productPath) && !File.Exists(Path.Combine(actualDirectory,".codex-switch-install.xml")), "helper 未从默认配置恢复自选安装路径");
             Check(!File.Exists(Path.Combine(c.HelperDirectory, "uninstall.exe")), "旧 helper 未先退休");
             Check(retired != null && File.Exists(retired), "旧 helper 唯一路径缺失");
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(c.UninstallKey)) Check(key == null, "同步返回后 ARP 仍在");
@@ -434,12 +436,150 @@ internal static class InstallerServiceTests
             legacy.Version = new Version("0.4.3.0");
             new InstallService(legacy).Install();
             string state = Path.Combine(legacy.InstallDirectory,".codex-switch-install.xml");
-            var document = new System.Xml.XmlDocument(); document.Load(state); document.DocumentElement.RemoveAttribute("components"); document.Save(state);
+            var document = new System.Xml.XmlDocument(); document.Load(state); document.DocumentElement.RemoveAttribute("components"); document.DocumentElement.RemoveAttribute("directory"); document.DocumentElement.RemoveAttribute("directoryOwned"); document.Save(state);
             legacy.Version = new Version("0.4.4.0");
             new InstallService(legacy).Install();
             Check(new InstallService(legacy).GetDefaultComponents() == InstallComponents.All, "v0.4.3 旧记录升级丢失组件");
             new InstallService(legacy).Uninstall();
         } finally { CleanRegistry(legacy); }
+    }
+    private static void CustomDirectories()
+    {
+        InstallConfiguration c = Configuration("custom");
+        try {
+            string chosen = Path.Combine(Path.GetDirectoryName(c.InstallDirectory), "自选 Programs");
+            Directory.CreateDirectory(chosen);
+            InstallService service = new InstallService(c);
+            Check(!service.HasInstalledLocation,"首次安装误报已有目录");
+            service.Install(InstallComponents.All, chosen);
+            Check(service.HasInstalledLocation,"已有自选路径未通过归属检测");
+            Check(c.InstallDirectory != chosen && service.DirectoryPath == chosen, "自选路径不应修改默认配置");
+            Check(new InstallService(c).DirectoryPath == chosen, "新服务未恢复已有安装路径");
+            Check(!File.Exists(Product(c)), "自选安装仍写入默认目录");
+            service.Install();
+            Check(File.Exists(Path.Combine(chosen,"CodexSwitch.exe")) && !File.Exists(Product(c)), "省略路径升级未保留实际目录");
+            string sentinel = Path.Combine(chosen, "auth.json"); File.WriteAllText(sentinel, "account sentinel");
+            string moved = Path.Combine(Path.GetDirectoryName(c.InstallDirectory), "迁移 Programs");
+            string oldState = File.ReadAllText(Path.Combine(chosen, ".codex-switch-install.xml"));
+            Directory.CreateDirectory(moved);
+            string conflict = Path.Combine(moved,"codex-switch.exe"); File.WriteAllText(conflict,"foreign");
+            Fails(delegate { service.Install(InstallComponents.All,moved); }, "不属于");
+            Check(File.ReadAllText(conflict) == "foreign" && File.Exists(Path.Combine(chosen,"CodexSwitch.exe")), "迁移覆盖目标外来文件");
+            File.Delete(conflict); Directory.Delete(moved);
+            foreach (string point in new string[] { "files", "path", "registration" }) {
+                c.Fault = delegate(string p) { if (p == point) throw new IOException("迁移失败"); };
+                Fails(delegate { service.Install(InstallComponents.All, moved); }, "迁移失败");
+                Check(new InstallService(c).DirectoryPath == chosen && File.ReadAllText(Path.Combine(chosen,".codex-switch-install.xml")) == oldState, "迁移未恢复归属状态");
+                Check(File.Exists(Path.Combine(chosen,"CodexSwitch.exe")) && !File.Exists(Path.Combine(moved,"CodexSwitch.exe")), "迁移未回滚文件");
+                Check(((string)Raw(c,"Path")).Contains(chosen) && !((string)Raw(c,"Path")).Contains(moved), "迁移未回滚 PATH");
+            }
+            c.Fault = null;
+            string beforeConcurrent = (string)Raw(c,"Path");
+            c.Fault = delegate(string p) { if (p == "files") using (RegistryKey k = Registry.CurrentUser.OpenSubKey(c.UninstallKey,true)) k.SetValue("DisplayName","concurrent"); };
+            Fails(delegate { service.Install(InstallComponents.All,moved); }, "正在被其他程序修改");
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(c.UninstallKey,true)) { Check((string)k.GetValue("DisplayName") == "concurrent", "回滚覆盖并发登记"); k.SetValue("DisplayName","Codex Switch"); }
+            Check((string)Raw(c,"Path") == beforeConcurrent && !File.Exists(Path.Combine(moved,"CodexSwitch.exe")), "登记竞争未回滚文件与 PATH");
+            c.Fault = null;
+            SetPath(c,beforeConcurrent + ";C:\\foreign-added",RegistryValueKind.ExpandString);
+            service.Install(InstallComponents.Cli, moved);
+            Check(new InstallService(c).DirectoryPath == moved && new InstallService(c).GetDefaultComponents() == InstallComponents.Cli, "迁移路径/组件未恢复");
+            Check(File.ReadAllText(sentinel) == "account sentinel" && !File.Exists(Path.Combine(chosen,"CodexSwitch.exe")), "迁移扰动账号或残留旧文件");
+            Check(!((string)Raw(c,"Path")).Contains(chosen) && ((string)Raw(c,"Path")).Contains(moved), "迁移未替换 owned PATH");
+            Check(((string)Raw(c,"Path")).Contains("C:\\foreign-added"), "迁移删除外来 PATH 项");
+            new InstallService(c).Uninstall();
+            Check(Directory.Exists(chosen) && File.ReadAllText(sentinel) == "account sentinel", "迁移/卸载删除原目录或账号");
+            Check(!Directory.Exists(moved), "卸载未清理自行新建的空目录");
+            Check((string)Raw(c,"Path") == "C:\\foreign-added", "卸载未保留迁移前外来 PATH");
+            Directory.CreateDirectory(moved);
+            service.Install(InstallComponents.Desktop, moved);
+            new InstallService(c).Uninstall();
+            Check(Directory.Exists(moved), "卸载删除用户原有空目录");
+            foreach (string bad in new string[] { "relative", "C:relative", "C:\\", chosen + ";C:\\injected", chosen + "\\..\\escape", chosen + "\\tail.", chosen + "\\tail ", chosen + "\\%TEMP%", chosen + "\\CON", chosen + "\\wild*card" })
+                Fails(delegate { service.Install(InstallComponents.Cli,bad); }, "路径");
+            string shortcutDirectory = Path.Combine(c.ProgramsDirectory,"Codex Switch"); Directory.CreateDirectory(shortcutDirectory);
+            service.Install(InstallComponents.All,shortcutDirectory);
+            new InstallService(c).Uninstall();
+            Check(Directory.Exists(shortcutDirectory),"卸载删除与开始菜单重合的用户自选空目录");
+        } finally { CleanRegistry(c); }
+    }
+    private static void CustomDirectoryEvidence()
+    {
+        InstallConfiguration c = Configuration("directory-evidence");
+        try {
+            string custom = Path.Combine(Path.GetDirectoryName(c.InstallDirectory),"Actual");
+            new InstallService(c).Install(InstallComponents.All,custom);
+            string state = Path.Combine(custom,".codex-switch-install.xml");
+            string goodState = File.ReadAllText(state);
+            // A copied state is not evidence that the copy is an installed root.
+            string other = Path.Combine(Path.GetDirectoryName(custom),"Copied"); Directory.CreateDirectory(other);
+            File.WriteAllText(Path.Combine(other,".codex-switch-install.xml"),goodState);
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(c.UninstallKey,true)) k.SetValue("InstallLocation",other);
+            Check(new InstallService(c).DirectoryPath == c.InstallDirectory, "未校验 state 的路径绑定");
+            Fails(delegate { new InstallService(c).Uninstall(); }, "归属记录缺失");
+            Check(File.Exists(Path.Combine(custom,"CodexSwitch.exe")), "无效登记扰动真实安装");
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(c.UninstallKey,true)) k.SetValue("InstallLocation",custom);
+            File.Delete(state);
+            Fails(delegate { new InstallService(c).Install(); }, "归属记录缺失");
+            File.WriteAllText(state,goodState);
+            new InstallService(c).Uninstall();
+            string link = Path.Combine(Path.GetDirectoryName(custom),"Linked");
+            using (Process p = Process.Start(new ProcessStartInfo("cmd.exe", "/c mklink /J " + Quoted(link) + " " + Quoted(other)) { UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true })) {
+                p.WaitForExit(); Check(p.ExitCode == 0,"无法创建隔离 junction 夹具");
+            }
+            Fails(delegate { new InstallService(c).Install(InstallComponents.All,link); }, "链接");
+            Directory.Delete(link); // Remove only the junction itself.
+        } finally { CleanRegistry(c); }
+    }
+    private static void MigrationPathOwnership()
+    {
+        InstallConfiguration c = Configuration("migration-path");
+        try {
+            string chosen = Path.Combine(Path.GetDirectoryName(c.InstallDirectory),"PreexistingPath");
+            string before = c.InstallDirectory + ";C:\\foreign;" + chosen;
+            SetPath(c,before,RegistryValueKind.String);
+            new InstallService(c).Install(InstallComponents.Cli);
+            new InstallService(c).Install(InstallComponents.Cli,chosen);
+            new InstallService(c).Uninstall();
+            Check((string)Raw(c,"Path") == before && Kind(c) == RegistryValueKind.String,"迁移或卸载删除用户原有源/目标 PATH");
+            new InstallService(c).Install(InstallComponents.Desktop);
+            string foreign = Path.Combine(c.InstallDirectory,"codex-switch.exe"); File.WriteAllText(foreign,"foreign CLI");
+            new InstallService(c).Install(InstallComponents.All,chosen);
+            Check(File.ReadAllText(foreign) == "foreign CLI","迁移修改源目录未归属组件");
+            new InstallService(c).Uninstall();
+        } finally { CleanRegistry(c); }
+    }
+    private static void PercentDirectories()
+    {
+        InstallConfiguration c = Configuration("percent-literal");
+        try {
+            c.InstallDirectory = Path.Combine(Path.GetDirectoryName(c.InstallDirectory),"100% 完成","工具");
+            c.HelperDirectory += " 100%";
+            c.ProgramsDirectory += " 100%";
+            new InstallService(c).Install(InstallComponents.All);
+            new InstallService(c).Install();
+            Check(File.Exists(Product(c)) && new InstallService(c).HasInstalledLocation,"字面百分号目录安装/升级失败");
+            new InstallService(c).Uninstall();
+            Check(!File.Exists(Product(c)) && Raw(c,"Path") == null,"字面百分号目录卸载失败");
+        } finally { CleanRegistry(c); }
+        c = Configuration("percent-variable");
+        string variable = "CODEX_SWITCH_TEST_PERCENT";
+        string previous = Environment.GetEnvironmentVariable(variable);
+        Environment.SetEnvironmentVariable(variable,"expanded");
+        try {
+            c.InstallDirectory = Path.Combine(Path.GetDirectoryName(c.InstallDirectory),"%"+variable+"%");
+            Fails(delegate { new InstallService(c).Install(InstallComponents.Cli); },"PATH");
+            Check(!File.Exists(Path.Combine(c.InstallDirectory,"codex-switch.exe")),"环境变量语法拒绝后留下文件");
+            SetPath(c,"C:\\foreign",RegistryValueKind.String);
+            new InstallService(c).Install(InstallComponents.Cli); // REG_SZ is literal.
+            string before = (string)Raw(c,"Path");
+            string state = Path.Combine(c.InstallDirectory,".codex-switch-install.xml");
+            var document = new System.Xml.XmlDocument(); document.Load(state); document.DocumentElement.RemoveAttribute("directory"); document.DocumentElement.RemoveAttribute("directoryOwned"); document.Save(state);
+            SetPath(c,before,RegistryValueKind.ExpandString); // Existing legacy installation.
+            new InstallService(c).Install();
+            Check((string)Raw(c,"Path") == before,"保留既有百分号安装时重复追加/拒绝 PATH");
+            new InstallService(c).Uninstall();
+            Check((string)Raw(c,"Path") == "C:\\foreign" && !File.Exists(Path.Combine(c.InstallDirectory,"codex-switch.exe")),"旧百分号目录卸载失败");
+        } finally { Environment.SetEnvironmentVariable(variable,previous); CleanRegistry(c); }
     }
     public static int Main(string[] args)
     {
@@ -451,7 +591,7 @@ internal static class InstallerServiceTests
             } catch (Exception e) { Console.Error.WriteLine(e); return 1; }
         }
         scratch = args[0];
-        try { Arguments(); Components(); ComponentOwnership(); LeafOwnershipMetadataPolicy(); Lifecycle(); OwnershipAndPath(); RollbackAndLocks(); RollbackPreservesIndependentFiles(); TransactionObjectOwnership(); LegacyAndUnsafe(); RealImagesAndConcurrency(); ShortcutAndRegistration(); CleanupFailureAfterCommit(); Console.WriteLine("PASS " + assertions + " assertions"); return 0; }
+        try { PercentDirectories(); CustomDirectories(); CustomDirectoryEvidence(); MigrationPathOwnership(); Arguments(); Components(); ComponentOwnership(); LeafOwnershipMetadataPolicy(); Lifecycle(); OwnershipAndPath(); RollbackAndLocks(); RollbackPreservesIndependentFiles(); TransactionObjectOwnership(); LegacyAndUnsafe(); RealImagesAndConcurrency(); ShortcutAndRegistration(); CleanupFailureAfterCommit(); Console.WriteLine("PASS " + assertions + " assertions"); return 0; }
         catch (Exception e) { Console.Error.WriteLine(e); return 1; }
     }
 }
