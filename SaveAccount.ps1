@@ -1,4 +1,6 @@
 ﻿# Credentials are copied as bytes; errors and UI never reveal their content.
+. (Join-Path $PSScriptRoot 'UiStyle.ps1')
+
 function Assert-SavePlainPath {
     param([string]$Path)
     $cursor = [IO.Path]::GetFullPath($Path)
@@ -92,45 +94,112 @@ function Save-SwitchAccount {
 }
 
 function Show-SaveAccountNameDialog {
-    param($Owner)
+    param($Owner, [Parameter(Mandatory = $true)][scriptblock]$SaveAction)
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
+    $palette = Get-SwitchPalette
     $dialog = New-Object System.Windows.Forms.Form
+    $dialog.SuspendLayout()
     try {
         $dialog.Name = 'SaveAccountDialog'
-        $dialog.Text = '保存当前登录'
+        $dialog.Text = '保存账号'
         $dialog.StartPosition = 'CenterParent'
         $dialog.FormBorderStyle = 'FixedDialog'
-        $dialog.ClientSize = New-Object System.Drawing.Size(420, 145)
+        $dialog.AutoScaleMode = 'Dpi'
+        $dialog.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
+        $dialog.ClientSize = New-Object System.Drawing.Size(440, 304)
         $dialog.MaximizeBox = $false
         $dialog.MinimizeBox = $false
+        $dialog.ShowIcon = $false
+        $dialog.ShowInTaskbar = $false
+        $dialog.BackColor = $palette.Surface
+        $dialog.ForeColor = $palette.Ink
         $dialog.Font = $Owner.Font
+        $title = New-Object System.Windows.Forms.Label
+        $title.Text = '保存当前登录'
+        $title.Font = New-Object System.Drawing.Font($Owner.Font.FontFamily, 15, [System.Drawing.FontStyle]::Bold)
+        $title.AutoSize = $true
+        $title.Location = New-Object System.Drawing.Point(24, 20)
+        $hint = New-Object System.Windows.Forms.Label
+        $hint.Text = '为当前登录添加名称，方便下次选择。'
+        $hint.AutoSize = $true
+        $hint.ForeColor = $palette.Muted
+        $hint.Location = New-Object System.Drawing.Point(24, 61)
         $label = New-Object System.Windows.Forms.Label
-        $label.Text = '为当前登录输入一个新的账号名称：'
+        $label.Text = '账号名称'
         $label.AutoSize = $true
-        $label.Location = New-Object System.Drawing.Point(16, 16)
-        $input = New-Object System.Windows.Forms.TextBox
-        $input.Name = 'AccountNameInput'
-        $input.AccessibleName = '账号名称'
-        $input.Location = New-Object System.Drawing.Point(16, 44)
-        $input.Size = New-Object System.Drawing.Size(388, 28)
-        $input.MaxLength = 100
+        $label.Location = New-Object System.Drawing.Point(24, 100)
+        $nameBox = New-Object System.Windows.Forms.TextBox
+        $nameBox.Name = 'AccountNameInput'
+        $nameBox.AccessibleName = '账号名称'
+        $nameBox.Location = New-Object System.Drawing.Point(24, 127)
+        $nameBox.Size = New-Object System.Drawing.Size(392, 30)
+        $nameBox.BorderStyle = 'FixedSingle'
+        $nameBox.MaxLength = 100
+        $nameBox.TabIndex = 0
+        $errorLabel = New-Object System.Windows.Forms.Label
+        $errorLabel.Name = 'SaveErrorLabel'
+        $errorLabel.AccessibleName = '保存提示'
+        $errorLabel.ForeColor = $palette.Error
+        $errorLabel.Location = New-Object System.Drawing.Point(24, 169)
+        $errorLabel.Size = New-Object System.Drawing.Size(392, 52)
+        $errorLabel.Padding = New-Object Windows.Forms.Padding(7, 4, 7, 4)
         $ok = New-Object System.Windows.Forms.Button
         $ok.Name = 'ConfirmSaveButton'
-        $ok.Text = '保存'
-        $ok.Location = New-Object System.Drawing.Point(232, 94)
-        $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $ok.Text = '保存账号'
+        $ok.Location = New-Object System.Drawing.Point(308, 240)
+        $ok.Size = New-Object System.Drawing.Size(108, 40)
+        Set-SwitchButtonStyle -Button $ok -Role Primary
+        $ok.TabIndex = 1
+        # Do not assign OK here: failed backend validation must keep this dialog open.
+        $ok.DialogResult = [System.Windows.Forms.DialogResult]::None
         $cancel = New-Object System.Windows.Forms.Button
         $cancel.Name = 'CancelSaveButton'
         $cancel.Text = '取消'
-        $cancel.Location = New-Object System.Drawing.Point(320, 94)
+        $cancel.Location = New-Object System.Drawing.Point(208, 240)
+        $cancel.Size = New-Object System.Drawing.Size(88, 40)
+        Set-SwitchButtonStyle -Button $cancel -Role Secondary
+        $cancel.TabIndex = 2
+        $cancel.CausesValidation = $false
         $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-        $dialog.Controls.AddRange(@($label, $input, $ok, $cancel))
+        $nameBox.Add_TextChanged({
+            $errorLabel.Text = ''
+            Set-SwitchInputError -TextBox $nameBox -HasError $false
+        }.GetNewClosure())
+        $errorLabel.Add_TextChanged({
+            $errorLabel.BackColor = if ($errorLabel.Text) { $palette.ErrorSurface } else { $palette.Surface }
+        }.GetNewClosure())
+        $ok.Add_Click({
+            $ok.Enabled = $false
+            try {
+                # All name and filesystem rules remain in the existing save backend.
+                $result = & $SaveAction -Name $nameBox.Text
+                if ($result.Success) { $dialog.DialogResult = [System.Windows.Forms.DialogResult]::OK }
+                else {
+                    $errorLabel.Text = $result.Message
+                    Set-SwitchInputError -TextBox $nameBox -HasError $true
+                    [void]$nameBox.Focus()
+                }
+            } catch {
+                $errorLabel.Text = '保存失败，请检查本机账号目录的访问权限。'
+                Set-SwitchInputError -TextBox $nameBox -HasError $true
+                [void]$nameBox.Focus()
+            } finally { $ok.Enabled = $true }
+        }.GetNewClosure())
+        $dialog.Add_Shown({ [void]$nameBox.Focus() }.GetNewClosure())
+        $dialog.Controls.AddRange(@($title, $hint, $label, $nameBox, $errorLabel, $ok, $cancel))
+        Set-SwitchInputStyle -TextBox $nameBox
         $dialog.AcceptButton = $ok
         $dialog.CancelButton = $cancel
-        if ($dialog.ShowDialog($Owner) -eq [System.Windows.Forms.DialogResult]::OK) { return $input.Text }
+        $dialog.ResumeLayout($false)
+        $dialog.PerformLayout()
+        if ($dialog.ShowDialog($Owner) -eq [System.Windows.Forms.DialogResult]::OK) { return $nameBox.Text }
         return $null
-    } finally { $dialog.Dispose() }
+    } finally {
+        $titleFont = $title.Font
+        $dialog.Dispose()
+        if ($titleFont) { $titleFont.Dispose() }
+    }
 }
 
 function Connect-SaveAccount {
@@ -141,14 +210,24 @@ function Connect-SaveAccount {
     $handler = {
         $Window.SaveButton.Enabled = $false
         try {
-            $name = & $showName -Owner $Window.Form
+            $state = @{ Result = $null }
+            $saveBackend = $save
+            $saveRoot = $Root
+            $saveAction = {
+                param([AllowEmptyString()][string]$Name)
+                $state.Result = & $saveBackend -Root $saveRoot -Name $Name
+                return $state.Result
+            }.GetNewClosure()
+            $name = & $showName -Owner $Window.Form -SaveAction $saveAction
             if ($null -eq $name) { $Window.StatusLabel.Text = '已取消保存。'; return }
-            $result = & $save -Root $Root -Name $name
-            if ($result.Success) { & $Window.RefreshAccounts }
-            $Window.StatusLabel.Text = $result.Message
+            if ($state.Result.Success) { & $Window.RefreshAccounts -SelectName $name }
+            $Window.StatusLabel.Text = $state.Result.Message
         } catch {
             $Window.StatusLabel.Text = '保存失败，请检查本机账号目录的访问权限。'
-        } finally { $Window.SaveButton.Enabled = $true }
+        } finally {
+            $Window.SaveButton.Enabled = $true
+            [void]$Window.SaveButton.Focus()
+        }
     }.GetNewClosure()
     $Window.SaveButton.Add_Click($handler)
     $Window.SaveButton.Enabled = $true

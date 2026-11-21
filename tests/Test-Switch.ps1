@@ -255,14 +255,36 @@ try {
         $row = $window.AccountList.GetItemRectangle(0)
         $mouse = New-Object System.Windows.Forms.MouseEventArgs([System.Windows.Forms.MouseButtons]::Left, 1, ($row.X+2), ($row.Y+2), 0)
         [void]$onMouseClick.Invoke($window.AccountList, @($mouse.PSObject.BaseObject))
-        Assert ($calls.Count -eq 3) 'A single left click on a real row switches immediately'
+        Assert ($calls.Count -eq 2) 'A single left click only previews the row'
         $blank = New-Object System.Windows.Forms.MouseEventArgs([System.Windows.Forms.MouseButtons]::Left, 1, 10, 185, 0)
         [void]$onMouseClick.Invoke($window.AccountList, @($blank.PSObject.BaseObject))
-        Assert ($calls.Count -eq 3) 'Clicking blank list space never switches a previous selection'
+        Assert ($calls.Count -eq 2) 'Clicking blank list space never switches a previous selection'
+        $window.SearchBox.Text = 'no-matching-name'
+        & $window.InvokeSelectedAccount
+        Assert ($calls.Count -eq 2 -and -not $window.SwitchButton.Enabled) 'A filtered-out target is never invoked'
+        $window.SearchBox.Text = '乙'
+        Assert ($calls.Count -eq 2) 'Typing a matching name only previews'
+        $onKeyDown = [System.Windows.Forms.ListBox].GetMethod('OnKeyDown', [Reflection.BindingFlags]'Instance,NonPublic')
+        $enter = New-Object System.Windows.Forms.KeyEventArgs([System.Windows.Forms.Keys]::Enter)
+        [void]$onKeyDown.Invoke($window.AccountList, @($enter.PSObject.BaseObject))
+        Assert ($calls.Count -eq 3 -and $calls[2] -ceq '乙' -and $enter.SuppressKeyPress) 'Enter switches the current visible row exactly once'
+        & $window.RefreshAccounts
+        Assert ($window.StatusLabel.Text -ceq '虚构切换完成') 'Refreshing names preserves the actual switch result'
         $replacement = { param($Root,$Name); $calls.Add('replacement'); [pscustomobject]@{Success=$true; Message='替换回调'} }.GetNewClosure()
         & $window.SetSwitchAction $replacement
         & $window.InvokeSelectedAccount
         Assert ($calls[3] -eq 'replacement') 'Desktop workflow can replace the callback without rebinding events'
+        $failure = {
+            param($Root,$Name)
+            Assert (-not $window.AccountList.Enabled -and -not $window.SearchBox.Enabled -and -not $window.SaveButton.Enabled -and -not $window.SwitchButton.Enabled) 'Switch temporarily disables all conflicting controls'
+            & $window.InvokeSelectedAccount
+            [pscustomobject]@{ Success=$false; Code='WriteFailed'; Message='虚构切换失败，原登录保持不变。' }
+        }.GetNewClosure()
+        & $window.SetSwitchAction $failure
+        & $window.InvokeSelectedAccount
+        & $window.RefreshAccounts
+        Assert ($window.StatusLabel.Text -ceq '虚构切换失败，原登录保持不变。') 'A failed switch remains a failure after refreshing the catalog'
+        Assert ($window.AccountList.Enabled -and $window.SearchBox.Enabled -and $window.SaveButton.Enabled -and $window.SwitchButton.Enabled) 'Controls recover after a failed switch'
     } finally { $window.Form.Dispose() }
     Write-Output 'PASS: ticket 02 isolated switch, backup, rollback, lock, paths, idempotence and GUI callback.'
 } finally {
