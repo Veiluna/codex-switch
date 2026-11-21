@@ -26,7 +26,7 @@ namespace CodexSwitch.Setup
         internal Version Version;
         internal Func<string, byte[]> LoadPayload;
         internal Action<string, string> CreateShortcut;
-        internal Action<string> Fault;
+        internal Action<string> Fault { get; set; }
         internal bool CheckMachineLegacy;
         internal bool BroadcastEnvironment;
 
@@ -208,6 +208,7 @@ namespace CodexSwitch.Setup
                     files.Commit(configuration.Fault);
                     DeferredCleanupPath = files.DeferredCleanupPath;
                 } catch (Exception failure) {
+                    if (files.IsCommitted) throw new InvalidOperationException("操作已提交，但旧缓存清理未完成；请保留安装目录和缓存后重试。", failure);
                     List<string> recovery = new List<string>();
                     if (registryChanged) {
                         try {
@@ -490,6 +491,7 @@ namespace CodexSwitch.Setup
             }
             private readonly List<Entry> entries = new List<Entry>();
             private bool completed;
+            internal bool IsCommitted { get { return completed; } }
             internal string DeferredCleanupPath { get; private set; }
             internal void Acquire(string target, string expectedHash) { Acquire(target, expectedHash, false); }
             internal void Acquire(string target, string expectedHash, bool runningHelper)
