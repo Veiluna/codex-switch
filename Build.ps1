@@ -1,7 +1,8 @@
-param([ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$Version = '0.4.0', [switch]$SkipInstaller, [switch]$SkipNpm)
+param([ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$Version = '0.4.2', [switch]$SkipInstaller, [switch]$SkipNpm)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 $root = $PSScriptRoot
+. (Join-Path $root 'installer\Test-ReleasePayload.ps1')
 if (-not [Environment]::Is64BitProcess) { throw 'Run build.cmd from 64-bit Windows, or use 64-bit Windows PowerShell.' }
 # A parent PowerShell 7 process can pass its module search path into Windows PowerShell.
 # Resolve the two inbox modules explicitly so no third-party/PowerShell 7 module is loaded.
@@ -54,8 +55,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Desktop compilation failed.' }
     & $compiler @hostArgs '/target:exe' '/define:CLI' ('/out:' + $cli) $versionSource $hostSources.FullName $cliSources.FullName
     if ($LASTEXITCODE -ne 0) { throw 'CLI compilation failed.' }
+    Assert-ReleasePayload -Path @($exe, $cli)
     $artifacts = @($exe, $cli)
-    $inputFiles = @($sources.FullName) + @($embeddedNames | ForEach-Object { Join-Path $root $_ }) + @((Join-Path $root 'Build.ps1'),(Join-Path $root 'installer\app.manifest'))
+    $inputFiles = @($sources.FullName) + @($embeddedNames | ForEach-Object { Join-Path $root $_ }) + @((Join-Path $root 'Build.ps1'),(Join-Path $root 'installer\app.manifest'),(Join-Path $root 'installer\Test-ReleasePayload.ps1'))
     if (-not $SkipInstaller) {
         $setupSources = @(Get-ChildItem -LiteralPath (Join-Path $root 'installer\native') -Filter '*.cs' -File | Sort-Object Name)
         $sharedSetup = @($setupSources | Where-Object { $_.Name -notin @('SetupProgram.cs','UninstallHost.cs') } | ForEach-Object { $_.FullName })
@@ -63,12 +65,14 @@ try {
         $uninstaller = Join-Path $work 'uninstall.exe'
         & $compiler @setupArgs '/main:CodexSwitch.Setup.UninstallHost' ('/out:' + $uninstaller) $versionSource $sharedSetup (Join-Path $root 'installer\native\UninstallHost.cs')
         if ($LASTEXITCODE -ne 0) { throw 'Uninstaller compilation failed.' }
+        Assert-ReleasePayload -Path $uninstaller
         $installer = Join-Path $work 'installer.exe'
         $payloadArgs = @('/resource:' + $exe + ',Payload.CodexSwitch.exe'
                          '/resource:' + $cli + ',Payload.codex-switch.exe'
                          '/resource:' + $uninstaller + ',Payload.uninstall.exe')
         & $compiler @setupArgs @payloadArgs '/main:CodexSwitch.Setup.SetupProgram' ('/out:' + $installer) $versionSource $sharedSetup (Join-Path $root 'installer\native\SetupProgram.cs')
         if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
+        Assert-ReleasePayload -Path $installer
         $artifacts += $installer
         $inputFiles += $setupSources.FullName
         if (-not $SkipNpm) {

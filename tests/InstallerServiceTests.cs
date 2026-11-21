@@ -180,7 +180,94 @@ internal static class InstallerServiceTests
             new InstallService(c).Uninstall();
         } finally { CleanRegistry(c); }
     }
+    private static void RollbackPreservesIndependentFiles()
+    {
+        foreach (string scenario in new string[] { "before-publish", "after-publish", "after-remove", "new-after-publish" }) {
+            InstallConfiguration c = Configuration("preserve-independent-" + scenario);
+            try {
+                bool firstInstall = scenario == "new-after-publish";
+                if (!firstInstall) new InstallService(c).Install();
+                string previous = firstInstall ? null : File.ReadAllText(Product(c));
+                string independent = "independent file retained " + scenario;
+                c.Version = new Version("0.4.1.0");
+                c.LoadPayload = delegate(string n) { return Encoding.UTF8.GetBytes("replacement " + n); };
+                bool callbackRan = false;
+                c.Fault = delegate(string point) {
+                    if (scenario == "before-publish" && point == "publish:CodexSwitch.exe") {
+                        callbackRan = true;
+                        File.WriteAllText(Product(c), independent);
+                    } else if (scenario != "before-publish" && point == "files") {
+                        callbackRan = true;
+                        if (scenario == "after-publish" || firstInstall) File.Move(Product(c), Product(c) + ".published-fixture");
+                        File.WriteAllText(Product(c), independent);
+                        throw new IOException("模拟操作失败");
+                    }
+                };
+                Fails(delegate {
+                    if (scenario == "after-remove") new InstallService(c).Uninstall();
+                    else new InstallService(c).Install();
+                }, "程序文件恢复失败");
+                Check(callbackRan, "未经过隔离回滚场景：" + scenario);
+                Check(File.ReadAllText(Product(c)) == independent, "回滚改动独立文件：" + scenario);
+                string[] backups = Directory.GetFiles(c.InstallDirectory, "CodexSwitch.exe.cs-backup-*");
+                Check(firstInstall ? backups.Length == 0 : backups.Length == 1 && File.ReadAllText(backups[0]) == previous, "未保留原程序备份：" + scenario);
+                if (scenario == "after-publish" || firstInstall)
+                    Check(!File.Exists(Product(c) + ".published-fixture"), "未通过自有句柄回滚本次发布对象：" + scenario);
+            } finally { CleanRegistry(c); }
+        }
+    }
     private static string Quoted(string value) { return "\"" + value + "\""; }
+    private static void TransactionObjectOwnership()
+    {
+        foreach (string scenario in new string[] { "cleanup-backup", "rollback-backup", "move-old", "publish-new" }) {
+            InstallConfiguration c = Configuration("object-ownership-" + scenario);
+            try {
+                new InstallService(c).Install();
+                string previous = File.ReadAllText(Product(c));
+                string independent = "independent ordinary file " + scenario;
+                string independentPath = null;
+                string relocated = Product(c) + ".relocated-fixture";
+                bool callbackRan = false;
+                c.Version = new Version("0.4.1.0");
+                c.LoadPayload = delegate(string n) { return Encoding.UTF8.GetBytes("published " + n); };
+                c.Fault = delegate(string point) {
+                    if (callbackRan) return;
+                    if ((scenario == "cleanup-backup" && point == "cleanup") || (scenario == "rollback-backup" && point == "files")) {
+                        independentPath = Directory.GetFiles(c.InstallDirectory, "CodexSwitch.exe.cs-backup-*")[0];
+                    } else if (scenario == "move-old" && point == "move:CodexSwitch.exe") {
+                        independentPath = Product(c);
+                    } else if (scenario == "publish-new" && point == "publish:CodexSwitch.exe") {
+                        independentPath = Directory.GetFiles(c.InstallDirectory, "CodexSwitch.exe.cs-new-*")[0];
+                    } else return;
+                    callbackRan = true;
+                    File.Move(independentPath, relocated);
+                    File.WriteAllText(independentPath, independent);
+                    if (scenario == "rollback-backup") throw new IOException("模拟操作失败");
+                };
+                if (scenario == "rollback-backup") Fails(delegate { new InstallService(c).Install(); }, "模拟操作失败");
+                else if (scenario == "move-old") new InstallService(c).Uninstall();
+                else new InstallService(c).Install();
+                Check(callbackRan, "未经过对象归属隔离场景：" + scenario);
+                Check(File.Exists(independentPath) && File.ReadAllText(independentPath) == independent, "按名字操作了独立文件：" + scenario);
+                if (scenario == "rollback-backup") Check(File.ReadAllText(Product(c)) == previous, "未从已持有对象恢复原程序");
+                else if (scenario != "move-old") Check(File.ReadAllText(Product(c)) == "published Payload.CodexSwitch.exe", "未发布本次持有的对象：" + scenario);
+                Check(!File.Exists(relocated), "已持有对象未完成自身移动或清理：" + scenario);
+            } finally { CleanRegistry(c); }
+        }
+    }
+    private static void LeafOwnershipMetadataPolicy()
+    {
+        // Simulate handle metadata rather than constructing replacement links.
+        Type transaction = typeof(InstallService).GetNestedType("FileTransaction", BindingFlags.NonPublic);
+        MethodInfo policy = transaction.GetMethod("IsPlainOwnedFile", BindingFlags.Static | BindingFlags.NonPublic);
+        Check(policy != null, "缺少持有句柄的普通文件归属检查");
+        Check((bool)policy.Invoke(null, new object[] { (uint)FileAttributes.Normal, 1u }), "拒绝单链接普通文件");
+        Check((bool)policy.Invoke(null, new object[] { (uint)FileAttributes.Archive, 1u }), "拒绝普通存档属性文件");
+        Check(!(bool)policy.Invoke(null, new object[] { (uint)FileAttributes.ReparsePoint, 1u }), "接受了重解析点元数据");
+        Check(!(bool)policy.Invoke(null, new object[] { (uint)FileAttributes.Directory, 1u }), "接受了目录元数据");
+        Check(!(bool)policy.Invoke(null, new object[] { (uint)FileAttributes.Normal, 2u }), "接受了多链接元数据");
+        Check(!(bool)policy.Invoke(null, new object[] { (uint)FileAttributes.Normal, 0u }), "接受了无有效链接的元数据");
+    }
     private static string WorkerArguments(InstallConfiguration c)
     {
         return "--worker " + Quoted(c.InstallDirectory) + " " + Quoted(c.ProgramsDirectory) + " " + Quoted(c.HelperDirectory) + " " + Quoted(c.UninstallKey) + " " + Quoted(c.EnvironmentKey) + " " + Quoted(c.LegacyKey) + " " + Quoted(c.MutexName);
@@ -223,13 +310,10 @@ internal static class InstallerServiceTests
             Check(retired != null && File.Exists(retired), "旧 helper 唯一路径缺失");
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(c.UninstallKey)) Check(key == null, "同步返回后 ARP 仍在");
             new InstallService(c).Install();
-            string script = UninstallHost.CleanupScript(c, retired, Int32.MaxValue);
-            string powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
-            using (Process cleanup = Start(powershell, "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(script)))) { string errors = cleanup.StandardError.ReadToEnd(); cleanup.WaitForExit(); Check(cleanup.ExitCode == 0, "旧缓存清理进程失败：" + errors); }
-            Check(!File.Exists(retired), "旧缓存未清理");
-            Check(File.Exists(Path.Combine(c.HelperDirectory,"uninstall.exe")), "延迟清理删除了快速重装的新 helper");
-            Fails(delegate { UninstallHost.CleanupScript(c, Product(c), 1); }, "不属于");
-            Fails(delegate { UninstallHost.CleanupScript(c, Path.Combine(c.HelperDirectory,"uninstall.exe.cs-backup-..\\outside"), 1); }, "不属于");
+            Check(File.Exists(retired), "快速重装不应自动删除已退休缓存");
+            Check(File.Exists(Path.Combine(c.HelperDirectory,"uninstall.exe")), "快速重装的新 helper 缺失");
+            Check(typeof(UninstallHost).GetMethod("ScheduleCleanup", BindingFlags.Static | BindingFlags.NonPublic) == null, "卸载不能调度后台清理");
+            Check(typeof(UninstallHost).GetMethod("CleanupScript", BindingFlags.Static | BindingFlags.NonPublic) == null, "卸载不能生成后台清理脚本");
             new InstallService(c).Uninstall();
         } finally { CleanRegistry(c); }
     }
@@ -275,11 +359,11 @@ internal static class InstallerServiceTests
         if (args.Length == 8 && args[0] == "--worker") {
             try {
                 InstallConfiguration c = new InstallConfiguration { InstallDirectory=args[1], ProgramsDirectory=args[2], HelperDirectory=args[3], UninstallKey=args[4], EnvironmentKey=args[5], LegacyKey=args[6], MutexName=args[7], CheckMachineLegacy=false, BroadcastEnvironment=false };
-                InstallService service = new InstallService(c); service.Uninstall(); Console.WriteLine(service.DeferredCleanupPath); return 0;
+                InstallService service = new InstallService(c); service.Uninstall(); Console.WriteLine(service.RetainedHelperPath); return 0;
             } catch (Exception e) { Console.Error.WriteLine(e); return 1; }
         }
         scratch = args[0];
-        try { Lifecycle(); OwnershipAndPath(); RollbackAndLocks(); LegacyAndUnsafe(); RealImagesAndConcurrency(); ShortcutAndRegistration(); CleanupFailureAfterCommit(); Console.WriteLine("PASS " + assertions + " assertions"); return 0; }
+        try { LeafOwnershipMetadataPolicy(); Lifecycle(); OwnershipAndPath(); RollbackAndLocks(); RollbackPreservesIndependentFiles(); TransactionObjectOwnership(); LegacyAndUnsafe(); RealImagesAndConcurrency(); ShortcutAndRegistration(); CleanupFailureAfterCommit(); Console.WriteLine("PASS " + assertions + " assertions"); return 0; }
         catch (Exception e) { Console.Error.WriteLine(e); return 1; }
     }
 }

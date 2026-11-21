@@ -235,12 +235,27 @@ namespace CodexSwitch
 
         public OperationResult Switch(string target,Func<string,string,bool> confirm)
         {
+            return SwitchCore(target,null,confirm);
+        }
+
+        public OperationResult Switch(string target,string snapshotId,Func<string,string,bool> confirm)
+        {
+            if(String.IsNullOrEmpty(snapshotId)) return Result(false,"InvalidSelection","请刷新账号列表后重新选择。");
+            return SwitchCore(target,snapshotId,confirm);
+        }
+
+        OperationResult SwitchCore(string target,string snapshotId,Func<string,string,bool> confirm)
+        {
             if(!AccountStore.ValidName(target)) return Result(false,"InvalidName","请选择已保存的目标账号。");
             try
             {
                 using(Lock())
                 {
                     CatalogEntry selected=Entry(AccountStore.ReadArchive(root,target),target,true);
+                    // A menu selection refers to the archive that was displayed, not a reused alias.
+                    // Check under the shared lock before desktop closure, quota capture or writes.
+                    if(snapshotId!=null && snapshotId!=selected.SnapshotId)
+                        return Result(false,"SelectionChanged","所选账号存档已变化，请刷新账号列表后重新选择。");
                     AccountStore.Json(selected.Bytes);
                     string auth=Path.Combine(root,"auth.json");
                     byte[] current=OptionalRead(auth);

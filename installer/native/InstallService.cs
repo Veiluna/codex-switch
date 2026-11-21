@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Xml;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace CodexSwitch.Setup
 {
@@ -83,8 +84,8 @@ namespace CodexSwitch.Setup
         private readonly InstallConfiguration configuration;
         internal string DirectoryPath { get { return configuration.InstallDirectory; } }
         // A running uninstall helper is renamed to this unique cache filename. Only
-        // this obsolete instance may be removed after it exits, never a new install.
-        internal string DeferredCleanupPath { get; private set; }
+        // this obsolete instance is retained without any deferred deletion process.
+        internal string RetainedHelperPath { get; private set; }
         internal InstallService() : this(InstallConfiguration.Default()) { }
         internal InstallService(InstallConfiguration configuration)
         {
@@ -155,7 +156,7 @@ namespace CodexSwitch.Setup
             PathValue pathWritten = null;
             RegistrySnapshot registrationWritten = null;
             bool registryChanged = false;
-            using (FileTransaction files = new FileTransaction()) {
+            using (FileTransaction files = new FileTransaction(configuration.Fault)) {
                 try {
                     foreach (string name in PayloadNames) {
                         string target = PayloadTarget(name);
@@ -206,7 +207,7 @@ namespace CodexSwitch.Setup
                         Fault("registration");
                     }
                     files.Commit(configuration.Fault);
-                    DeferredCleanupPath = files.DeferredCleanupPath;
+                    RetainedHelperPath = files.RetainedHelperPath;
                 } catch (Exception failure) {
                     if (files.IsCommitted) throw new InvalidOperationException("操作已提交，但旧缓存清理未完成；请保留安装目录和缓存后重试。", failure);
                     List<string> recovery = new List<string>();
@@ -361,7 +362,11 @@ namespace CodexSwitch.Setup
         private static void NotifyEnvironment() { UIntPtr result; SendMessageTimeout(new IntPtr(0xffff), 0x1a, UIntPtr.Zero, "Environment", 2, 1000, out result); }
 
         internal sealed class InstallFailure : Exception { internal InstallFailure(string message, Exception inner) : base(message, inner) { } }
-        private sealed class InstallFileException : IOException { internal InstallFileException(string message) : base(message) { } }
+        private sealed class InstallFileException : IOException
+        {
+            internal InstallFileException(string message) : base(message) { }
+            internal InstallFileException(string message, Exception inner) : base(message, inner) { }
+        }
 
         private sealed class PathValue
         {
@@ -490,9 +495,89 @@ namespace CodexSwitch.Setup
                 internal bool RunningHelper;
             }
             private readonly List<Entry> entries = new List<Entry>();
+            private readonly Action<string> fault;
             private bool completed;
+            private const uint ReadWriteDeleteAccess = 0xc0010000;
+            private const uint ReadDeleteAccess = 0x80010000;
+            private const uint ShareDelete = 4;
+            private const uint ShareReadDelete = 5;
+            private const uint CreateNew = 1;
+            private const uint OpenExisting = 3;
+            private const uint NormalAttributes = 0x80;
+            private const uint OpenReparsePoint = 0x00200000;
+            private const int FileRenameInfo = 3;
+            private const int FileDispositionInfo = 4;
             internal bool IsCommitted { get { return completed; } }
-            internal string DeferredCleanupPath { get; private set; }
+            internal string RetainedHelperPath { get; private set; }
+            internal FileTransaction(Action<string> fault) { this.fault = fault; }
+            [StructLayout(LayoutKind.Sequential)]
+            private struct Disposition { [MarshalAs(UnmanagedType.U1)] internal bool DeleteFile; }
+            [StructLayout(LayoutKind.Sequential)]
+            private struct RenameInfo { internal uint Flags; internal IntPtr RootDirectory; internal uint FileNameLength; internal ushort FileName; }
+            [StructLayout(LayoutKind.Sequential)]
+            private struct FileInfo
+            {
+                internal uint Attributes;
+                internal System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+                internal uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+            }
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, ref Disposition info, uint size);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, IntPtr info, uint size);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInfo info);
+            private static bool IsPlainOwnedFile(uint attributes, uint links)
+            {
+                return (attributes & (uint)(FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0 && links == 1;
+            }
+            private static FileStream OpenOwnedFile(string path, bool create, bool runningHelper)
+            {
+                // Retain DELETE access on the same object used by the ownership hash.
+                SafeFileHandle handle = CreateFile(path, runningHelper ? ReadDeleteAccess : ReadWriteDeleteAccess,
+                    runningHelper ? ShareReadDelete : ShareDelete, IntPtr.Zero, create ? CreateNew : OpenExisting,
+                    NormalAttributes | (create ? 0u : OpenReparsePoint), IntPtr.Zero);
+                if (handle.IsInvalid) {
+                    int error = Marshal.GetLastWin32Error();
+                    handle.Dispose();
+                    throw new IOException("无法打开安装文件。", new System.ComponentModel.Win32Exception(error));
+                }
+                try {
+                    // Check the opened leaf itself before hashing or changing it. A
+                    // preceding pathname check cannot establish this handle's ownership.
+                    FileInfo info;
+                    if (!GetFileInformationByHandle(handle, out info))
+                        throw new InstallFileException("无法核验安装文件归属，已停止操作以保护文件。");
+                    if (!IsPlainOwnedFile(info.Attributes, info.Links))
+                        throw new InstallFileException("目标不是单链接普通文件，已停止操作以保护其他文件。");
+                    return new FileStream(handle, runningHelper ? FileAccess.Read : FileAccess.ReadWrite);
+                }
+                catch { handle.Dispose(); throw; }
+            }
+            private static void RenameOwnedFile(FileStream stream, string destination)
+            {
+                // FILE_RENAME_INFO uses a variable-length UTF-16 filename. Flags=0
+                // means ReplaceIfExists=false, including on recovery to the old name.
+                byte[] name = Encoding.Unicode.GetBytes(destination);
+                int offset = Marshal.OffsetOf(typeof(RenameInfo), "FileName").ToInt32();
+                int size = Math.Max(Marshal.SizeOf(typeof(RenameInfo)), offset + name.Length + 2);
+                IntPtr buffer = Marshal.AllocHGlobal(size);
+                try {
+                    Marshal.StructureToPtr(new RenameInfo { FileNameLength = (uint)name.Length }, buffer, false);
+                    Marshal.Copy(name, 0, IntPtr.Add(buffer, offset), name.Length);
+                    Marshal.WriteInt16(buffer, offset + name.Length, 0);
+                    if (!SetFileInformationByHandle(stream.SafeFileHandle, FileRenameInfo, buffer, (uint)size))
+                        throw new IOException("安装文件移动未完成，已保留文件及备份。", new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+                } finally { Marshal.FreeHGlobal(buffer); }
+            }
+            private static void RemoveOwnedFile(FileStream stream)
+            {
+                Disposition deletion = new Disposition { DeleteFile = true };
+                if (!SetFileInformationByHandle(stream.SafeFileHandle, FileDispositionInfo, ref deletion, (uint)Marshal.SizeOf(typeof(Disposition))))
+                    throw new IOException("本次安装文件无法回滚，已保留现场。", new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+            }
             internal void Acquire(string target, string expectedHash) { Acquire(target, expectedHash, false); }
             internal void Acquire(string target, string expectedHash, bool runningHelper)
             {
@@ -503,8 +588,9 @@ namespace CodexSwitch.Setup
                 if (!entry.HadFile) return;
                 if ((File.GetAttributes(target) & FileAttributes.ReparsePoint) != 0) throw new InstallFileException("目标文件是链接，已停止操作以保护其他文件。");
                 if (expectedHash == null) throw new InstallFileException("目标文件不属于本安装程序，已停止操作：" + Path.GetFileName(target));
-                try { entry.OldLock = new FileStream(target, FileMode.Open, runningHelper ? FileAccess.Read : FileAccess.ReadWrite, runningHelper ? FileShare.Read | FileShare.Delete : FileShare.Delete); }
-                catch (IOException) { throw new InstallFileException("程序文件正在使用，请关闭 Codex Switch 和相关终端后重试。"); }
+                try { entry.OldLock = OpenOwnedFile(target, false, runningHelper); }
+                catch (InstallFileException) { throw; }
+                catch (IOException error) { throw new InstallFileException("程序文件正在使用，请关闭 Codex Switch 和相关终端后重试：" + Path.GetFileName(target), error); }
                 if (Hash(entry.OldLock) != expectedHash) throw new InstallFileException("已安装文件已被修改，已停止操作以保护文件：" + Path.GetFileName(target));
             }
             private Entry Find(string target) { foreach (Entry entry in entries) if (entry.Target == target) return entry; throw new InvalidOperationException("未锁定的安装目标。"); }
@@ -512,24 +598,23 @@ namespace CodexSwitch.Setup
             {
                 Entry entry = Find(target);
                 string staged = target + ".cs-new-" + Guid.NewGuid().ToString("N");
-                try {
-                    using (FileStream stream = new FileStream(staged, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { stream.Write(bytes, 0, bytes.Length); stream.Flush(true); }
-                    // Hold the new image before making it visible, so another process cannot
-                    // start it halfway through an operation and prevent a rollback.
-                    entry.NewLock = new FileStream(staged, FileMode.Open, FileAccess.ReadWrite, FileShare.Delete);
-                    MoveOld(entry);
-                    File.Move(staged, target);
-                    entry.Changed = true;
-                } finally {
-                    if (File.Exists(staged)) { if (entry.NewLock != null) { entry.NewLock.Dispose(); entry.NewLock = null; } File.Delete(staged); }
-                }
+                // Keep the same handle through staging, publication and rollback. Other
+                // processes may rename it, but never redirect our rollback to another file.
+                entry.NewLock = OpenOwnedFile(staged, true, false);
+                entry.NewLock.Write(bytes, 0, bytes.Length);
+                entry.NewLock.Flush(true);
+                MoveOld(entry);
+                if (fault != null) fault("publish:" + Path.GetFileName(target));
+                RenameOwnedFile(entry.NewLock, target);
+                entry.Changed = true;
             }
             internal void Remove(string target) { Entry entry = Find(target); MoveOld(entry); }
-            private static void MoveOld(Entry entry)
+            private void MoveOld(Entry entry)
             {
                 if (!entry.HadFile) return;
                 entry.Backup = entry.Target + ".cs-backup-" + Guid.NewGuid().ToString("N");
-                File.Move(entry.Target, entry.Backup);
+                if (fault != null) fault("move:" + Path.GetFileName(entry.Target));
+                RenameOwnedFile(entry.OldLock, entry.Backup);
                 entry.Changed = true;
             }
             internal void Commit(Action<string> fault)
@@ -537,16 +622,17 @@ namespace CodexSwitch.Setup
                 // No destructive cleanup occurs until all replacements and registry writes succeeded.
                 completed = true;
                 foreach (Entry entry in entries) {
-                    try { if (entry.OldLock != null) entry.OldLock.Dispose(); } catch (IOException) { } finally { entry.OldLock = null; }
-                    try { if (entry.NewLock != null) entry.NewLock.Dispose(); } catch (IOException) { } finally { entry.NewLock = null; }
-                    if (entry.Backup != null && File.Exists(entry.Backup)) {
-                        if (entry.RunningHelper) DeferredCleanupPath = entry.Backup;
-                        else {
+                    try {
+                        if (entry.Backup != null) {
+                            if (entry.RunningHelper) RetainedHelperPath = entry.Backup;
                             // Cleanup is after the commit point. Keep this unique obsolete
                             // backup on failure; never undo the committed PATH/registration.
-                            try { if (fault != null) fault("cleanup"); File.Delete(entry.Backup); }
-                            catch (Exception) { }
+                            else { if (fault != null) fault("cleanup"); RemoveOwnedFile(entry.OldLock); }
                         }
+                    } catch (Exception) { }
+                    finally {
+                        try { if (entry.OldLock != null) entry.OldLock.Dispose(); } catch (IOException) { } finally { entry.OldLock = null; }
+                        try { if (entry.NewLock != null) entry.NewLock.Dispose(); } catch (IOException) { } finally { entry.NewLock = null; }
                     }
                 }
             }
@@ -557,10 +643,17 @@ namespace CodexSwitch.Setup
                 for (int i = entries.Count - 1; i >= 0; i--) {
                     Entry entry = entries[i];
                     try {
+                        if (entry.NewLock != null) {
+                            RemoveOwnedFile(entry.NewLock);
+                            entry.NewLock.Dispose();
+                            entry.NewLock = null;
+                        }
                         if (entry.Changed) {
-                            if (entry.NewLock != null) { entry.NewLock.Dispose(); entry.NewLock = null; }
-                            if (File.Exists(entry.Target)) File.Delete(entry.Target);
-                            if (entry.Backup != null && File.Exists(entry.Backup)) File.Move(entry.Backup, entry.Target);
+                            // No path-based deletion: an independently recreated target
+                            // stays in place, and the old backup remains available.
+                            if (File.Exists(entry.Target) || Directory.Exists(entry.Target))
+                                throw new InstallFileException("目标位置已被其他文件占用，已保留该文件和原程序备份。");
+                            if (entry.Backup != null) RenameOwnedFile(entry.OldLock, entry.Target);
                         }
                     } catch (Exception error) { problem = error; }
                 }

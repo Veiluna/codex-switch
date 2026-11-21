@@ -144,11 +144,62 @@ namespace CodexSwitch
         internal AccountRow(CatalogEntry entry) { Entry=entry; }
         public override string ToString() { return Entry.Name + (Entry.IsCurrent ? " · 当前登录" : "") + (!Entry.IsSaved ? " · 未保存" : "") + (String.IsNullOrEmpty(Reminder)?"":" · "+Reminder); }
     }
+    // Label's default DrawText padding grows with the font size. Detail headings use the
+    // same one-pixel text origin as the borderless RichEdit previews instead.
+    internal sealed class DetailLabel : Label
+    {
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            TextRenderer.DrawText(e.Graphics,Text,Font,new Rectangle(1,Padding.Top,Math.Max(0,Width-1),Height-Padding.Vertical),
+                ForeColor,TextFormatFlags.NoPadding|TextFormatFlags.NoPrefix|TextFormatFlags.WordBreak|(AutoEllipsis?TextFormatFlags.EndEllipsis:0));
+        }
+        internal static Label Create(string text,int size,bool bold)
+        {
+            return new DetailLabel { Text=text, Dock=DockStyle.Fill, Margin=Padding.Empty,
+                ForeColor=bold?NativeStyle.Ink:NativeStyle.Muted,
+                Font=new Font("Microsoft YaHei UI",size,bold?FontStyle.Bold:FontStyle.Regular) };
+        }
+    }
+    internal sealed class DetailPreview : RichTextBox
+    {
+        private string completeText="";
+        private string previewText="";
+        internal string CompleteText { get { return completeText; } set { SetContent(value,value); } }
+        internal void SetContent(string complete,string preview)
+        {
+            complete=complete??""; preview=preview??""; if(completeText==complete && previewText==preview) return;
+            completeText=complete; previewText=preview; RefreshPreview();
+        }
+        protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); RefreshPreview(); }
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); RefreshPreview(); }
+        private void RefreshPreview()
+        {
+            Text=previewText; if(!IsHandleCreated || TextLength==0 || ClientSize.Height<=0) return;
+            Select(0,0);
+            int lineHeight=Font.Height, next=GetFirstCharIndexFromLine(1);
+            if(next>0) lineHeight=Math.Max(lineHeight,GetPositionFromCharIndex(next).Y-GetPositionFromCharIndex(0).Y);
+            if(GetPositionFromCharIndex(TextLength-1).Y+lineHeight<=ClientSize.Height) return;
+            // Keep only complete visible lines. The modal always reads CompleteText, never this summary.
+            int low=0,high=previewText.Length;
+            while(low<high)
+            {
+                int middle=(low+high+1)/2; Text=previewText.Substring(0,middle).TrimEnd()+"…";
+                if(GetPositionFromCharIndex(TextLength-1).Y+lineHeight<=ClientSize.Height) low=middle; else high=middle-1;
+            }
+            Text=previewText.Substring(0,low).TrimEnd()+"…"; Select(0,0);
+        }
+        internal DetailPreview(string name)
+        {
+            Name=name; ReadOnly=true; Multiline=true; BorderStyle=BorderStyle.None; BackColor=NativeStyle.Surface;
+            ForeColor=NativeStyle.Muted; WordWrap=true; DetectUrls=false; ScrollBars=RichTextBoxScrollBars.None;
+            Dock=DockStyle.Fill; Margin=new Padding(0,2,0,8);
+        }
+    }
     internal sealed class MainForm : Form
     {
         private readonly IDesktopAccounts service;
         private readonly Button switchButton, saveButton, deleteButton;
-        private readonly RichTextBox basicDetails;
+        private readonly DetailPreview basicDetails;
         private readonly Label countLabel, statusLabel, currentLabel;
         private readonly ToolTip toolTip=new ToolTip();
         private readonly System.Windows.Forms.Timer reminderTimer=new System.Windows.Forms.Timer();
@@ -159,13 +210,14 @@ namespace CodexSwitch
         internal readonly InputFrame SearchInput;
         internal readonly Button RefreshButton;
         internal readonly ListBox AccountList;
-        internal readonly RichTextBox DetailName, QuotaText;
+        internal readonly DetailPreview DetailName, QuotaText;
         internal Func<string,bool> ConfirmDelete;
         internal Func<string,string,bool> ConfirmSwitch;
         internal bool OperationBusy { get { return busy; } }
         internal string StatusText { get { return statusLabel.Text; } }
         internal string CountText { get { return countLabel.Text; } }
         internal string CurrentText { get { return currentLabel.Text; } }
+        internal string FullDetailsText { get { return DetailName.CompleteText+Environment.NewLine+Environment.NewLine+basicDetails.CompleteText+Environment.NewLine+Environment.NewLine+"上次离开时的额度"+Environment.NewLine+QuotaText.CompleteText+(String.IsNullOrEmpty(StatusText)?"":Environment.NewLine+Environment.NewLine+"操作状态"+Environment.NewLine+StatusText); } }
         internal CatalogEntry SelectedEntry { get { var row=AccountList.SelectedItem as AccountRow; return row==null?null:row.Entry; } }
         internal CatalogEntry EntryAt(int index) { return ((AccountRow)AccountList.Items[index]).Entry; }
         internal void SelectEntry(string name)
@@ -200,19 +252,33 @@ namespace CodexSwitch
             saveButton=NativeStyle.Button("SaveButton","保存当前登录",false); saveButton.Dock=DockStyle.Fill; saveButton.Margin=Padding.Empty; sidebar.Controls.Add(saveButton,0,7);
             layout.Controls.Add(sidebar,0,0);
             var detail=new TableLayoutPanel { Dock=DockStyle.Fill, ColumnCount=1, RowCount=10, Margin=Padding.Empty, Padding=new Padding(30,24,30,16) };
-            foreach(int height in new[]{52,32,22,64,104,34}) detail.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
-            detail.RowStyles.Add(new RowStyle(SizeType.Percent,100)); detail.RowStyles.Add(new RowStyle(SizeType.Absolute,10)); detail.RowStyles.Add(new RowStyle(SizeType.Absolute,48)); detail.RowStyles.Add(new RowStyle(SizeType.Absolute,68));
-            detail.Controls.Add(NativeStyle.Label("切换账号",23,true),0,0); detail.Controls.Add(NativeStyle.Label("浏览账号后，明确点击切换或在列表按 Enter。",10,false),0,1);
-            detail.Controls.Add(NativeStyle.Label("正在查看",9,false),0,2);
-            DetailName=NativeStyle.ReadOnlyText("DetailNameLabel"); DetailName.AccessibleName="正在查看的完整账号名称"; DetailName.Font=new Font("Microsoft YaHei UI",18,FontStyle.Bold); DetailName.ForeColor=NativeStyle.Ink; detail.Controls.Add(DetailName,0,3);
-            basicDetails=NativeStyle.ReadOnlyText("AccountDetails"); basicDetails.AccessibleName="账号身份信息"; detail.Controls.Add(basicDetails,0,4);
-            detail.Controls.Add(NativeStyle.Label("上次离开时的额度",11,true),0,5);
-            QuotaText=NativeStyle.ReadOnlyText("QuotaText"); QuotaText.AccessibleName="额度快照、成功时间、失败状态及各窗口到点提醒"; detail.Controls.Add(QuotaText,0,6);
-            var actions=new FlowLayoutPanel { Dock=DockStyle.Fill, Margin=Padding.Empty, WrapContents=false };
+            foreach(int height in new[]{48,30,20,64,128,30}) detail.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
+            detail.RowStyles.Add(new RowStyle(SizeType.Percent,100)); detail.RowStyles.Add(new RowStyle(SizeType.Absolute,30)); detail.RowStyles.Add(new RowStyle(SizeType.Absolute,46)); detail.RowStyles.Add(new RowStyle(SizeType.Absolute,60));
+            detail.Controls.Add(DetailLabel.Create("切换账号",23,true),0,0); detail.Controls.Add(DetailLabel.Create("浏览账号后，明确点击切换或在列表按 Enter。",10,false),0,1);
+            detail.Controls.Add(DetailLabel.Create("正在查看",9,false),0,2);
+            DetailName=new DetailPreview("DetailNameLabel"); DetailName.AccessibleName="正在查看的账号名称，可查看完整详情"; DetailName.Font=new Font("Microsoft YaHei UI",18,FontStyle.Bold); DetailName.ForeColor=NativeStyle.Ink; detail.Controls.Add(DetailName,0,3);
+            basicDetails=new DetailPreview("AccountDetails"); basicDetails.AccessibleName="账号身份信息，可查看完整详情"; detail.Controls.Add(basicDetails,0,4);
+            detail.Controls.Add(DetailLabel.Create("上次离开时的额度",11,true),0,5);
+            QuotaText=new DetailPreview("QuotaText"); QuotaText.AccessibleName="额度快照、成功时间、失败状态及各窗口到点提醒，可查看完整详情"; detail.Controls.Add(QuotaText,0,6);
+            var complete=new LinkLabel { Name="ViewFullDetailsButton", Text="查看完整详情", AccessibleName="查看完整详情，可选择并复制全部内容",
+                AutoSize=true, UseCompatibleTextRendering=true, Margin=Padding.Empty, TabStop=true, TabIndex=6, LinkColor=NativeStyle.Primary, ActiveLinkColor=NativeStyle.Primary };
+            complete.LinkClicked+=delegate { using(var dialog=new FullDetailsDialog(FullDetailsText)) dialog.ShowDialog(this); };
+            detail.Controls.Add(complete,0,7);
+            var actions=new FlowLayoutPanel { Dock=DockStyle.Fill, Margin=new Padding(1,0,0,0), WrapContents=false };
             switchButton=NativeStyle.Button("SwitchButton","切换到此账号",true); switchButton.Width=180;
             deleteButton=NativeStyle.Button("DeleteButton","删除账号",false); deleteButton.Width=112;
             actions.Controls.Add(switchButton); actions.Controls.Add(deleteButton); detail.Controls.Add(actions,0,8);
-            statusLabel=NativeStyle.Label("",10,false); statusLabel.Name="StatusLabel"; statusLabel.AccessibleName="操作状态"; statusLabel.Padding=new Padding(8); statusLabel.AutoEllipsis=true; detail.Controls.Add(statusLabel,0,9); layout.Controls.Add(detail,1,0);
+            statusLabel=DetailLabel.Create("",10,false); statusLabel.Name="StatusLabel"; statusLabel.AccessibleName="操作状态"; statusLabel.Padding=new Padding(0,6,0,6); statusLabel.AutoEllipsis=true; detail.Controls.Add(statusLabel,0,9); layout.Controls.Add(detail,1,0);
+            bool compactDetails=false;
+            Resize+=delegate {
+                bool compact=ClientSize.Height<660; if(compact==compactDetails) return; compactDetails=compact;
+                detail.SuspendLayout();
+                int[] heights=compact?new[]{0,0,0,64,128,26,0,24,44,46}:new[]{48,30,20,64,128,30,0,30,46,60};
+                for(int row=0;row<heights.Length;row++) if(row!=6) detail.RowStyles[row].Height=heights[row];
+                detail.GetControlFromPosition(0,0).Visible=detail.GetControlFromPosition(0,1).Visible=detail.GetControlFromPosition(0,2).Visible=!compact;
+                detail.Padding=compact?new Padding(30,18,30,12):new Padding(30,24,30,16);
+                detail.ResumeLayout();
+            };
             SearchBox.TextChanged+=delegate { if(!loading) RenderAccounts(null); };
             AccountList.SelectedIndexChanged+=delegate { if(!loading) UpdateDetail(); };
             AccountList.KeyDown+=delegate(object sender,KeyEventArgs e) { if(e.KeyCode==Keys.Enter) { e.SuppressKeyPress=true; InvokeSelectedAccount(); } };
@@ -222,6 +288,7 @@ namespace CodexSwitch
             ConfirmSwitch=delegate(string phase,string target) { using(var dialog=new ConfirmSwitchDialog(phase,target)) return dialog.ShowDialog(this)==DialogResult.OK; };
             reminderTimer.Interval=1000; reminderTimer.Tick+=delegate { UpdateReminders(DateTimeOffset.UtcNow); }; reminderTimer.Start();
             Activated+=delegate { UpdateReminders(DateTimeOffset.UtcNow); };
+            Shown+=delegate { AccountList.Focus(); };
             FormClosing+=delegate(object sender,FormClosingEventArgs e) { if(busy) { e.Cancel=true; SetStatus("操作进行中，请等待结果后关闭窗口。"); } else closing=true; };
             RefreshAccounts(null);
         }
@@ -302,30 +369,41 @@ namespace CodexSwitch
             var selected=SelectedEntry; UpdateActions();
             if(selected==null)
             {
-                DetailName.Text=readFailed?"暂时无法读取账号":currentReadFailed?"无法识别当前登录":entries.Length==0?"还没有已保存的账号":"没有匹配的账号";
-                basicDetails.Text=readFailed?"请检查本机账号目录权限后刷新。":currentReadFailed?"当前登录暂时无法读取。请检查当前登录状态后刷新。":"先登录 Codex，再使用左侧“保存当前登录”添加账号。";
-                QuotaText.Text="尚无可显示的额度快照。"; return;
+                DetailName.CompleteText=readFailed?"暂时无法读取账号":currentReadFailed?"无法识别当前登录":entries.Length==0?"还没有已保存的账号":"没有匹配的账号";
+                basicDetails.CompleteText=readFailed?"请检查本机账号目录权限后刷新。":currentReadFailed?"当前登录暂时无法读取。请检查当前登录状态后刷新。":"先登录 Codex，再使用左侧“保存当前登录”添加账号。";
+                QuotaText.CompleteText="尚无可显示的额度快照。"; return;
             }
-            DetailName.Text=selected.Name; toolTip.SetToolTip(DetailName,selected.Name);
-            basicDetails.Text=(selected.IsCurrent?"当前登录"+(selected.IsSaved?"":" · 未保存")+Environment.NewLine:"")+"邮箱："+Known(selected.Email)+Environment.NewLine+"登录类型："+Known(selected.LoginType)+"    套餐："+Known(selected.Plan)+Environment.NewLine+"账号 ID："+Known(selected.AccountId);
+            DetailName.CompleteText=selected.Name; toolTip.SetToolTip(DetailName,selected.Name);
+            basicDetails.CompleteText=(selected.IsCurrent?"当前登录"+(selected.IsSaved?"":" · 未保存")+Environment.NewLine:"")+"邮箱："+Known(selected.Email)+Environment.NewLine+"登录类型："+Known(selected.LoginType)+Environment.NewLine+"套餐："+Known(selected.Plan)+Environment.NewLine+"账号 ID："+Known(selected.AccountId);
             UpdateQuotaText();
         }
         private void UpdateQuotaText()
         {
             var selected=SelectedEntry; if(selected==null) return;
             var text=new System.Text.StringBuilder();
-            text.AppendLine(selected.CapturedAtUtc.HasValue?"上次成功："+selected.CapturedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz"):"尚无成功记录。切离这个账号时会尝试保存。");
+            var summary=new System.Text.StringBuilder();
+            string captured=selected.CapturedAtUtc.HasValue?"上次成功："+selected.CapturedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz"):"尚无成功记录。切离这个账号时会尝试保存。";
+            text.AppendLine(captured); summary.AppendLine(captured);
             if(!String.IsNullOrEmpty(selected.SnapshotFailure) && (selected.QuotaText??"").IndexOf(selected.SnapshotFailure,StringComparison.Ordinal)<0) text.AppendLine(selected.SnapshotFailure);
             if(!String.IsNullOrWhiteSpace(selected.QuotaText)) text.AppendLine(selected.QuotaText);
+            // QuotaReader owns these exact display fields. Copy their values verbatim; never infer
+            // unknown values or parse percentages. Unrecognized formats retain their original text.
+            bool knownSummary=false;
+            foreach(string line in (selected.QuotaText??"").Replace("\r","").Split('\n'))
+                if(line.StartsWith("Credits 余额：",StringComparison.Ordinal) || line.IndexOf("：剩余",StringComparison.Ordinal)>=0 || line.IndexOf("：上次剩余",StringComparison.Ordinal)>=0)
+                { summary.AppendLine(line); knownSummary=true; }
+            if(!knownSummary && !String.IsNullOrWhiteSpace(selected.QuotaText)) summary.AppendLine(selected.QuotaText);
             if(selected.Windows!=null) foreach(var window in selected.Windows)
             {
                 string label=Known(window.Label);
-                if(!window.ResetAtUtc.HasValue) { text.AppendLine(label+"：重置时间未知"); continue; }
+                if(!window.ResetAtUtc.HasValue) { text.AppendLine(label+"：重置时间未知"); summary.AppendLine(label+"：重置时间未知"); continue; }
                 bool due=reminderNow>=window.ResetAtUtc.Value;
-                text.AppendLine(label+"："+(due?(window.Exhausted?"上次已用尽 · 已到点":"已到点"):"尚未到点")+" · 记录的重置时间 "+window.ResetAtUtc.Value.ToLocalTime().ToString("MM-dd HH:mm:ss"));
+                string reset=label+"："+(due?(window.Exhausted?"上次已用尽 · 已到点":"已到点"):"尚未到点")+" · 记录的重置时间 "+window.ResetAtUtc.Value.ToLocalTime().ToString("MM-dd HH:mm:ss");
+                text.AppendLine(reset); summary.AppendLine(reset);
             }
             if(selected.Windows!=null && selected.Windows.Length>0) text.Append("到点仅为时间提醒，剩余额度以新快照为准。");
-            string value=text.ToString(); if(QuotaText.Text!=value) QuotaText.Text=value;
+            if(!String.IsNullOrEmpty(selected.SnapshotFailure) && summary.ToString().IndexOf(selected.SnapshotFailure,StringComparison.Ordinal)<0) summary.Insert(0,selected.SnapshotFailure+Environment.NewLine);
+            QuotaText.SetContent(text.ToString(),summary.ToString().TrimEnd());
         }
         private void SetStatus(string value) { statusLabel.Text=value; statusLabel.BackColor=String.IsNullOrEmpty(value)?NativeStyle.Surface:NativeStyle.Sidebar; toolTip.SetToolTip(statusLabel,value); }
         private void SetResultStatus(string value) { SetStatus(value+(readFailed?" 列表刷新失败，当前显示可能已过时，请刷新重试。":currentReadFailed?" 无法识别当前登录，已保存的账号仍可浏览。":"")); }
@@ -395,6 +473,26 @@ namespace CodexSwitch
         {
             if(disposing) { closing=true; reminderTimer.Stop(); reminderTimer.Dispose(); toolTip.Dispose(); service.Dispose(); }
             base.Dispose(disposing);
+        }
+    }
+    internal sealed class FullDetailsDialog : Form
+    {
+        internal readonly RichTextBox DetailsText;
+        internal FullDetailsDialog(string details)
+        {
+            Name="FullAccountDetailsDialog"; Text="完整账号详情"; AccessibleName=Text; ShowIcon=false; ShowInTaskbar=false;
+            StartPosition=FormStartPosition.CenterParent; MinimizeBox=MaximizeBox=false;
+            Font=new Font("Microsoft YaHei UI",10); AutoScaleMode=AutoScaleMode.Font;
+            ClientSize=new Size(680,520); MinimumSize=new Size(480,360); BackColor=NativeStyle.Surface;
+            var layout=new TableLayoutPanel { Dock=DockStyle.Fill, Padding=new Padding(24), ColumnCount=1, RowCount=3 };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute,44)); layout.RowStyles.Add(new RowStyle(SizeType.Percent,100)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,44));
+            layout.Controls.Add(DetailLabel.Create("完整账号详情",15,true),0,0);
+            DetailsText=NativeStyle.ReadOnlyText("CompleteAccountDetails"); DetailsText.AccessibleName="完整账号详情，可按 Ctrl+A 全选、Ctrl+C 复制";
+            DetailsText.Text=details; DetailsText.TabIndex=0; layout.Controls.Add(DetailsText,0,1);
+            var close=NativeStyle.Button("CloseFullDetailsButton","关闭",false); close.DialogResult=DialogResult.Cancel; close.TabIndex=1;
+            close.Anchor=AnchorStyles.Left|AnchorStyles.Bottom; layout.Controls.Add(close,0,2);
+            Controls.Add(layout); CancelButton=close;
+            Shown+=delegate { DetailsText.Select(0,0); DetailsText.Focus(); };
         }
     }
     internal class NoticeDialog : Form

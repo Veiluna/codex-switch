@@ -209,12 +209,22 @@ namespace CodexSwitch
 
         static int Switch(AccountService service, string target, Options options)
         {
-            return Result(service.Switch(target, delegate(string phase, string prompt)
+            return Result(service.Switch(target, Confirmation(options)));
+        }
+
+        static int Switch(AccountService service, CatalogEntry selected, Options options)
+        {
+            return Result(service.Switch(selected.Name, selected.SnapshotId, Confirmation(options)));
+        }
+
+        static Func<string, string, bool> Confirmation(Options options)
+        {
+            return delegate(string phase, string prompt)
             {
                 if (phase == "Close") return options.AllowClose || Ask(prompt);
                 if (phase == "Force") return options.ForceClose || Ask(prompt);
                 return false;
-            }));
+            };
         }
 
         static int Menu(AccountService service, CatalogEntry[] entries, Options options)
@@ -234,7 +244,7 @@ namespace CodexSwitch
                 if (key == ConsoleKey.Escape) return 0;
                 if (key == ConsoleKey.UpArrow) selected = (selected + choices.Count - 1) % choices.Count;
                 else if (key == ConsoleKey.DownArrow) selected = (selected + 1) % choices.Count;
-                else if (key == ConsoleKey.Enter) return Switch(service, choices[selected].Name, options);
+                else if (key == ConsoleKey.Enter) return Switch(service, choices[selected], options);
             }
         }
 

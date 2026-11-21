@@ -31,6 +31,43 @@ internal static class AccountServiceReviewTests
         try {
             File.WriteAllBytes(archive,a); File.WriteAllBytes(Path.Combine(accounts,"other_auth.json"),b); File.WriteAllBytes(auth,a);
             using(var service=new AccountService(root)) {
+                CatalogEntry selected=Array.Find(service.List(),delegate(CatalogEntry e){return e.Name=="other";});
+                string selectedPath=Path.Combine(accounts,"other_auth.json");
+                int selectionBackendCalls=0,selectionConfirmCalls=0,selectionQuotaCalls=0;
+                service.SwitchBackend=delegate(string r,string n,byte[] expected,Func<string,string,bool> confirm,Action<byte[]> departure) {
+                    selectionBackendCalls++;
+                    return new OperationResult(true,"SyntheticSwitch","");
+                };
+                service.FetchQuota=delegate {selectionQuotaCalls++; throw new Exception("unexpected quota call");};
+                Func<string,string,bool> approve=delegate {selectionConfirmCalls++;return true;};
+                File.Delete(selectedPath);
+                File.WriteAllBytes(selectedPath,Auth("replacement","workspace-c"));
+                Check("菜单显示后同名存档换成另一身份时在关闭和额度前拒绝",delegate {
+                    var result=service.Switch(selected.Name,selected.SnapshotId,approve);
+                    return !result.Success && result.Code=="SelectionChanged" && selectionBackendCalls==0 && selectionConfirmCalls==0 && selectionQuotaCalls==0 && Convert.ToBase64String(File.ReadAllBytes(auth))==Convert.ToBase64String(a);
+                });
+                File.WriteAllBytes(auth,File.ReadAllBytes(selectedPath));
+                Check("同名新身份即使已是当前登录仍须拒绝旧菜单选择",delegate {
+                    var result=service.Switch(selected.Name,selected.SnapshotId,approve);
+                    return !result.Success && result.Code=="SelectionChanged" && selectionBackendCalls==0;
+                });
+                File.WriteAllBytes(auth,a);
+                File.WriteAllBytes(selectedPath,b);
+                Check("未变化的菜单快照进入切换事务",delegate {
+                    return service.Switch(selected.Name,selected.SnapshotId,approve).Success && selectionBackendCalls==1;
+                });
+                File.WriteAllBytes(selectedPath,Auth("replacement","workspace-c"));
+                Check("直接按名字切换仍解析调用时的同名账号",delegate {
+                    return service.Switch(selected.Name,approve).Success && selectionBackendCalls==2;
+                });
+                Check("快照绑定切换不能以缺失摘要退回按名字切换",delegate {
+                    return !service.Switch(selected.Name,null,approve).Success && !service.Switch(selected.Name,"",approve).Success && selectionBackendCalls==2;
+                });
+                File.Delete(selectedPath);
+                Check("菜单中的存档已删除时不进入切换事务",delegate {
+                    return !service.Switch(selected.Name,selected.SnapshotId,approve).Success && selectionBackendCalls==2;
+                });
+                File.WriteAllBytes(selectedPath,b);
                 using(var held=new FileStream(auth,FileMode.Open,FileAccess.ReadWrite,FileShare.None)) {
                     Check("活动凭据独占时仍返回其他已保存账号并报告识别失败",delegate { var list=service.List(); return list.Length==2 && Failed(service) && !Array.Exists(list,delegate(CatalogEntry e){return e.IsCurrent;}); });
                     Check("活动凭据独占时保存失败且不创建具名副本",delegate { return !service.Save("blocked").Success && !File.Exists(Path.Combine(accounts,"blocked_auth.json")); });

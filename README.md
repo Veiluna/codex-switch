@@ -2,16 +2,18 @@
 
 在 Windows 上用桌面窗口或 cmd 管理本机 Codex 账号。当前登录始终置顶，选择另一行可以先核对邮箱、账号 ID、套餐和额度快照，再决定是否切换。
 
-![虚构账号演示，alpha 为当前登录，右侧显示 beta 的历史额度](docs/design/v03-ui-synthetic.png)
+![账号详情示例：alpha 是当前登录，右侧显示 beta 的邮箱、账号 ID、历史额度及重置时间](docs/design/v042-details.png)
 
 ## 下载与启动
+
+**v0.4.0 安全提示**　本机 Microsoft Defender 已隔离本版的 `codex-switch.exe` 和 `installer.exe`。请暂停使用这两个附件及包含它们的 npm 包。需要图形界面时，可使用单独的便携桌面端 `CodexSwitch.exe`，该文件在本次单文件扫描中未检出威胁。
 
 从 [GitHub Releases](https://github.com/Veiluna/codex-switch/releases/latest) 下载 Windows x64 版本。
 
 | 文件 | 用法 |
 | --- | --- |
 | `installer.exe` | 双击打开图形安装器。为当前用户安装两个入口后，可从开始菜单打开桌面端，在新终端运行 `codex-switch`。 |
-| `veiluna-codex-switch-0.4.0.tgz` | npm 格式的 Windows x64 包，内含同版 CLI 及安装器，支持 npm 和 npx。 |
+| `veiluna-codex-switch-0.4.2.tgz` | npm 格式的 Windows x64 包，内含同版 CLI 及安装器，支持 npm 和 npx。 |
 | `CodexSwitch.exe` | 便携桌面端。双击打开。 |
 | `codex-switch.exe` | 便携命令行。可在 cmd 或 PowerShell 中单独运行。 |
 
@@ -32,20 +34,20 @@ PowerShell 可用 `(Start-Process .\installer.exe -ArgumentList 'install','--qui
 
 ### 用 npm 或 npx 获取
 
-已有 Node.js 和 npm 的 Windows x64 用户可以直接使用 GitHub 的版本附件。长期使用 CLI，可在终端执行：
+以下为后续通过安全验收的版本保留安装示例。将 `X.Y.Z` 替换为已核验的新版本号，在下载目录打开终端。长期使用 CLI 可执行：
 
 ```console
-npm install --global https://github.com/Veiluna/codex-switch/releases/download/v0.4.0/veiluna-codex-switch-0.4.0.tgz
+npm install --global ".\veiluna-codex-switch-X.Y.Z.tgz"
 codex-switch --help
 ```
 
 偶尔使用可直接运行一次：
 
 ```console
-npx --yes --package=https://github.com/Veiluna/codex-switch/releases/download/v0.4.0/veiluna-codex-switch-0.4.0.tgz -- codex-switch list
+npx --yes --package=".\veiluna-codex-switch-X.Y.Z.tgz" -- codex-switch list
 ```
 
-将末尾的 `codex-switch list` 换成 `codex-switch-install` 可打开图形安装器，换成 `codex-switch-install install --quiet` 可静默安装。也可先下载并核对 .tgz，再将 URL 换成本地包路径。Windows 安装器管理桌面安装，npm 管理由它安装的命令入口，可用 `npm uninstall --global @veiluna/codex-switch` 移除。此版本的 npm 获取地址为 GitHub Release 附件。
+将末尾的 `codex-switch list` 换成 `codex-switch-install` 可打开图形安装器，换成 `codex-switch-install install --quiet` 可静默安装。Windows 安装器管理桌面安装，npm 管理由它安装的命令入口，可用 `npm uninstall --global @veiluna/codex-switch` 移除。
 
 ## 第一次使用
 

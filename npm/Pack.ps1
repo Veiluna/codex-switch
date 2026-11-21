@@ -5,6 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'installer\Test-ReleasePayload.ps1')
 $dist = [IO.Path]::GetFullPath($DistPath)
 if (-not $OutputDirectory) { $OutputDirectory = $dist }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
@@ -43,6 +44,7 @@ try {
     }
     [void][IO.Directory]::CreateDirectory((Join-Path $stage 'native'))
     foreach ($name in $payloads) { Copy-Item -LiteralPath (Join-Path $dist $name) -Destination (Join-Path $stage ('native/' + $name)) }
+    Assert-ReleasePayload -Path @($payloads | ForEach-Object { Join-Path $stage ('native/' + $_) })
     Push-Location -LiteralPath $stage
     try {
         $json = & $npm pack --offline --ignore-scripts --json --pack-destination $stage

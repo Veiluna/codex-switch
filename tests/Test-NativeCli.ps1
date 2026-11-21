@@ -72,6 +72,10 @@ namespace CodexSwitch {
             bool force=target!="force" || confirm("Force","强制结束 Codex？");
             return new OperationResult(close&&force,"Switch",close&&force?"已切换":"未授权关闭");
         }
+        public OperationResult Switch(string target,string snapshotId,Func<string,string,bool> confirm) {
+            if(snapshotId!="snapshot") return new OperationResult(false,"SelectionChanged","所选账号存档已变化");
+            return Switch(target,confirm);
+        }
         public void Dispose() {}
     }
     internal static class Entry {static int Main(string[] args) {return CliProgram.Run(args);}}

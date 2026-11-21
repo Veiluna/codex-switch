@@ -52,10 +52,11 @@ Assert-PackRejected $invalid '0.4.0' 'missing installer'
 if ($LASTEXITCODE -ne 0) { throw 'x86 probe compilation failed.' }
 Assert-PackRejected $invalid '0.4.0' 'x86 native installer'
 if ($DistPath) {
+    $realVersion = (Get-Content -LiteralPath (Join-Path $DistPath 'build-info.json') -Raw | ConvertFrom-Json).Version
     $real = Join-Path $temporary 'real'
     [void][IO.Directory]::CreateDirectory($real)
-    & (Join-Path $root 'npm\Pack.ps1') -Version '0.4.0' -DistPath $DistPath -OutputDirectory $real
-    & node (Join-Path $PSScriptRoot 'npm-distribution.cjs') $real $npmCli $npxCli '--real'
+    & (Join-Path $root 'npm\Pack.ps1') -Version $realVersion -DistPath $DistPath -OutputDirectory $real
+    & node (Join-Path $PSScriptRoot 'npm-distribution.cjs') $real $npmCli $npxCli '--real' $realVersion
     if ($LASTEXITCODE -ne 0) { throw 'Real native package smoke checks failed.' }
 }
 Write-Host ('PASS: npm distribution checks. Isolated evidence: ' + $temporary)
