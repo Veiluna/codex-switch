@@ -327,7 +327,7 @@ namespace CodexSwitch.Setup
         private static bool SamePath(string entry, string directory)
         {
             string candidate = Environment.ExpandEnvironmentVariables(entry.Trim().Trim('"')).TrimEnd('\\', '/');
-            try { return String.Equals(Path.GetFullPath(candidate), directory.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
+            try { return Path.IsPathRooted(candidate) && String.Equals(Path.GetFullPath(candidate), directory.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
             catch { return false; }
         }
 
