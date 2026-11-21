@@ -10,11 +10,42 @@
 
 | 文件 | 用法 |
 | --- | --- |
-| `CodexSwitch-0.3.0-x64.msi` | 为当前用户安装两个入口。从开始菜单打开桌面端，在新开的终端输入 `codex-switch`。 |
+| `installer.exe` | 双击打开图形安装器。为当前用户安装两个入口后，可从开始菜单打开桌面端，在新终端运行 `codex-switch`。 |
+| `veiluna-codex-switch-0.4.0.tgz` | npm 格式的 Windows x64 包，内含同版 CLI 及安装器，支持 npm 和 npx。 |
 | `CodexSwitch.exe` | 便携桌面端。双击打开。 |
 | `codex-switch.exe` | 便携命令行。可在 cmd 或 PowerShell 中单独运行。 |
 
 使用系统 .NET Framework 4.8 和 Windows PowerShell 5.1。分发文件未签名，发布页提供 SHA-256。安装、升级和卸载均保留账号目录。需要使用 Codex 的本地文件凭据，默认目录为 `%USERPROFILE%\.codex`，也可以指定 `CODEX_HOME`。
+
+### 图形安装和命令行安装
+
+下载 `installer.exe` 后可离线使用。双击进入中文确认窗口。要在脚本中静默安装并等待完成，在下载目录的 cmd 里运行：
+
+```cmd
+start "" /wait ".\installer.exe" install --quiet
+echo %ERRORLEVEL%
+```
+
+PowerShell 可用 `(Start-Process .\installer.exe -ArgumentList 'install','--quiet' -Wait -PassThru).ExitCode`。静默卸载将 `install` 改为 `uninstall`。安装和卸载成功返回 0，运行失败返回 1，参数错误返回 2。也可从 Windows 设置 → 应用 → 已安装的应用卸载。
+
+**从 0.3 MSI 迁移**：先在 Windows「已安装的应用」中卸载旧版 Codex Switch，再运行新版安装器。新程序会识别旧版安装登记，账号文件继续保存在原来的 Codex 目录。
+
+### 用 npm 或 npx 获取
+
+已有 Node.js 和 npm 的 Windows x64 用户可以直接使用 GitHub 的版本附件。长期使用 CLI，可在终端执行：
+
+```console
+npm install --global https://github.com/Veiluna/codex-switch/releases/download/v0.4.0/veiluna-codex-switch-0.4.0.tgz
+codex-switch --help
+```
+
+偶尔使用可直接运行一次：
+
+```console
+npx --yes --package=https://github.com/Veiluna/codex-switch/releases/download/v0.4.0/veiluna-codex-switch-0.4.0.tgz -- codex-switch list
+```
+
+将末尾的 `codex-switch list` 换成 `codex-switch-install` 可打开图形安装器，换成 `codex-switch-install install --quiet` 可静默安装。也可先下载并核对 .tgz，再将 URL 换成本地包路径。Windows 安装器管理桌面安装，npm 管理由它安装的命令入口，可用 `npm uninstall --global @veiluna/codex-switch` 移除。此版本的 npm 获取地址为 GitHub Release 附件。
 
 ## 第一次使用
 
@@ -46,4 +77,4 @@ codex-switch delete "旧账号"
 
 ## 从源码构建
 
-在 Windows x64 上运行 `build.cmd`。产物和构建记录位于 `dist`。两个 C# 入口使用同一份共享核心；其中嵌入已经验证的 PowerShell 文件操作和桌面管理代码。构建与安装验证见[分发说明](installer/README.md)。本轮需求、分票和验收在 [0.3 规格议题](https://github.com/Veiluna/codex-switch/issues/1) 中追踪。
+在 Windows x64 上运行 `build.cmd`。产物和构建记录位于 `dist`。两个 C# 入口使用同一份共享核心；其中嵌入已经验证的 PowerShell 文件操作和桌面管理代码。构建与安装验证见[分发说明](installer/README.md)。账号功能见 [0.3 规格](https://github.com/Veiluna/codex-switch/issues/1)，安装和分发见 [0.4 规格与开发票](https://github.com/Veiluna/codex-switch/issues/8)。

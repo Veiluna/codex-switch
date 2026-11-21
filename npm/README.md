@@ -3,7 +3,7 @@
 Windows x64 原生 Codex 账号切换工具，需要 Windows PowerShell 5.1、.NET Framework 4.x 和 Node.js 18 或以上的 x64 版本。
 
 ```powershell
-npm install --global @veiluna/codex-switch
+npm install --global https://github.com/Veiluna/codex-switch/releases/download/v0.4.0/veiluna-codex-switch-0.4.0.tgz
 codex-switch
 codex-switch help
 ```
@@ -11,7 +11,7 @@ codex-switch help
 一次运行默认进入原生 CLI：
 
 ```powershell
-npx @veiluna/codex-switch
+npx --yes --package=https://github.com/Veiluna/codex-switch/releases/download/v0.4.0/veiluna-codex-switch-0.4.0.tgz -- codex-switch
 ```
 
 包内自带同版原生 CLI 和安装器，无 JavaScript 依赖，无 npm 安装生命周期脚本，不在安装时下载 EXE。npm 安装仅提供上述命令；需要桌面安装时显式运行：
@@ -27,7 +27,7 @@ codex-switch-install uninstall --quiet
 也可一次运行安装器：
 
 ```powershell
-npx --package=@veiluna/codex-switch codex-switch-install
+npx --yes --package=https://github.com/Veiluna/codex-switch/releases/download/v0.4.0/veiluna-codex-switch-0.4.0.tgz -- codex-switch-install
 ```
 
 本地离线分发包可使用 `npm install --global --offline .\veiluna-codex-switch-0.4.0.tgz` 安装。
